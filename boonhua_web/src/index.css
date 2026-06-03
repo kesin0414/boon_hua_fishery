@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+.bh-login-bg {
+  background: linear-gradient(135deg, #e8f4ff 0%, #f5f6fa 45%, #e0fff8 100%);
+}
+
+.bh-float {
+  animation: bh-float 6s ease-in-out infinite;
+}
+
+.bh-float-delay {
+  animation: bh-float 7s ease-in-out infinite 1.2s;
+}
+
+.bh-card-enter {
+  animation: bh-card-enter 0.5s ease-out;
+}
+
+@keyframes bh-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes bh-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media print {
+  @page {
+    margin: 12mm;
+    size: auto;
+  }
+
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  body {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  #dashboard-overview .recharts-responsive-container {
+    height: 220px !important;
+    min-height: 220px !important;
+  }
+
+  #dashboard-overview .recharts-wrapper,
+  #dashboard-overview svg {
+    overflow: visible !important;
+  }
+}

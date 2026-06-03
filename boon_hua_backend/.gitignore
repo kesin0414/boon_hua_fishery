@@ -1,0 +1,20 @@
+# Virtual Environment (bulky files)
+venv/
+ENV/
+.venv/
+
+# Firebase Secrets (DO NOT SHARE THESE)
+firebase_credentials.json
+*-firebase-adminsdk*.json
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables
+.env
+
+# Operating System files
+Thumbs.db
+.DS_Store

@@ -1,0 +1,15 @@
+# Render Blueprint — deploy boon_hua_backend as a Web Service
+services:
+  - type: web
+    name: boonhua-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      # Paste full firebase_credentials.json content in Render dashboard:
+      # - key: FIREBASE_CREDENTIALS_JSON
+      #   sync: false
