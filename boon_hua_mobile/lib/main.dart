@@ -17,7 +17,11 @@ import 'consumer_settings.dart';
 import 'firebase_options.dart';
 import 'notification_service.dart';
 import 'receipt_scanner.dart';
+import 'app_branding.dart';
+import 'recipe_ai_chef_screen.dart';
+import 'recipe_ai_service.dart';
 import 'settings_screen.dart';
+import 'splash_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,7 +55,7 @@ class BoonHuaApp extends StatelessWidget {
         fontFamily: 'Roboto',
         useMaterial3: true,
       ),
-      home: const MobileAuthGate(),
+      home: const AppSplashScreen(child: MobileAuthGate()),
     );
   }
 }
@@ -282,7 +286,7 @@ class RecipeSuggestionService {
                   .toList(),
             }),
           )
-          .timeout(const Duration(seconds: 25));
+          .timeout(const Duration(seconds: 55));
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -405,7 +409,10 @@ class _MobileAuthGateState extends State<MobileAuthGate> {
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            backgroundColor: AppColors.navyDark,
+            body: Center(
+              child: CircularProgressIndicator(color: AppColors.teal),
+            ),
           );
         }
 
@@ -537,24 +544,7 @@ class _AuthScreenState extends State<AuthScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(20),
-                    child: Image.asset(
-                      'assets/app_icon.png',
-                      width: 72,
-                      height: 72,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const CircleAvatar(
-                        radius: 28,
-                        backgroundColor: AppColors.navy,
-                        child: Icon(
-                          Icons.phishing_rounded,
-                          color: AppColors.teal,
-                          size: 30,
-                        ),
-                      ),
-                    ),
-                  ),
+                  const Center(child: AppLogo(size: 88, borderRadius: 22)),
                   const SizedBox(height: 14),
                   const Text(
                     'Boon Hua Fishery',
@@ -565,6 +555,16 @@ class _AuthScreenState extends State<AuthScreen> {
                       fontWeight: FontWeight.w900,
                     ),
                   ),
+                  const Text(
+                    'Track seafood at home — expiry alerts, prices & meal ideas',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
                   Text(
                     _isRegister ? 'Create Account' : 'Login',
                     textAlign: TextAlign.center,
@@ -929,7 +929,7 @@ class _ConsumerShellState extends State<ConsumerShell> {
         onUpdate: _updatePriceHistory,
         onDelete: _deletePriceHistory,
       ),
-      RecipesScreen(freezerItems: _freezerItems),
+      RecipesScreen(userId: widget.user.uid, freezerItems: _freezerItems),
       SettingsScreen(
         user: widget.user,
         freezerItems: _freezerItems,
@@ -1076,6 +1076,14 @@ class AppHeader extends StatelessWidget {
                     color: Colors.white,
                     fontWeight: FontWeight.w900,
                     fontSize: 16,
+                  ),
+                ),
+                const Text(
+                  'Consumer · Virtual freezer & recipes',
+                  style: TextStyle(
+                    color: Color(0xFFB8C4E8),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 Text(
@@ -2557,8 +2565,13 @@ class PriceHistoryCard extends StatelessWidget {
 }
 
 class RecipesScreen extends StatefulWidget {
-  const RecipesScreen({super.key, required this.freezerItems});
+  const RecipesScreen({
+    super.key,
+    required this.userId,
+    required this.freezerItems,
+  });
 
+  final String userId;
   final List<FreezerItem> freezerItems;
 
   @override
@@ -2568,11 +2581,26 @@ class RecipesScreen extends StatefulWidget {
 class _RecipesScreenState extends State<RecipesScreen> {
   final RecipeSuggestionService _recipeService = RecipeSuggestionService();
   late Future<RecipeSuggestResult> _recipeFuture;
+  bool _isRegenerating = false;
 
-  void _refreshRecipes() {
+  Future<void> _refreshRecipes({bool showSnack = false}) async {
     setState(() {
+      _isRegenerating = true;
       _recipeFuture = _recipeService.suggestRecipes(widget.freezerItems);
     });
+    try {
+      await _recipeFuture;
+      if (showSnack && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('AI meal ideas regenerated from your freezer.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isRegenerating = false);
+    }
   }
 
   @override
@@ -2628,7 +2656,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
                       ),
                       SizedBox(height: 4),
                       Text(
-                        'Recipes matched to what is in your freezer',
+                        'AI recipes from your freezer stock',
                         style: TextStyle(color: Colors.white70, fontSize: 12),
                       ),
                     ],
@@ -2638,10 +2666,82 @@ class _RecipesScreenState extends State<RecipesScreen> {
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.white24,
                   ),
-                  onPressed: _refreshRecipes,
-                  icon: const Icon(Icons.refresh, color: Colors.white),
+                  onPressed: _isRegenerating ? null : () => _refreshRecipes(),
+                  icon: _isRegenerating
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.refresh, color: Colors.white),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: _isRegenerating || widget.freezerItems.isEmpty
+                ? null
+                : () => _refreshRecipes(showSnack: true),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.navy,
+              side: const BorderSide(color: AppColors.teal, width: 1.5),
+              minimumSize: const Size.fromHeight(44),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            icon: Icon(
+              _isRegenerating ? Icons.hourglass_top : Icons.auto_awesome,
+              size: 20,
+            ),
+            label: Text(
+              _isRegenerating
+                  ? 'Regenerating AI recipes…'
+                  : 'Regenerate AI recipes',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.navy,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => RecipeAiChefScreen(
+                      userId: widget.userId,
+                      freezerItems: widget.freezerItems
+                          .map(
+                            (item) => FreezerItemPayload(
+                              species: item.species,
+                              stockKg: item.stockKg,
+                              daysRemaining: item.daysRemaining,
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.chat_bubble_outline, color: Colors.white),
+              label: const Text(
+                'Ask AI Recipe Chef',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 14),
@@ -2667,11 +2767,19 @@ class _RecipesScreenState extends State<RecipesScreen> {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (result.usedApi && result.source == 'themealdb')
+                  if (result.usedApi && result.source == 'ai')
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        'AI-generated recipes based on your virtual freezer — prioritising items that expire soon.',
+                        style: TextStyle(color: AppColors.muted, fontSize: 12),
+                      ),
+                    )
+                  else if (result.usedApi && result.source == 'themealdb')
                     Padding(
                       padding: const EdgeInsets.only(bottom: 10),
                       child: Text(
-                        'Recipes from TheMealDB matched to your freezer (e.g. ${widget.freezerItems.first.species} → meals with that ingredient).',
+                        'Backup suggestions from recipe database (AI unavailable).',
                         style: const TextStyle(color: AppColors.muted, fontSize: 12),
                       ),
                     )
@@ -2679,7 +2787,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
                     const Padding(
                       padding: EdgeInsets.only(bottom: 10),
                       child: Text(
-                        'Suggestions from recipe database based on your virtual freezer.',
+                        'Recipe suggestions from curated database based on your freezer.',
                         style: TextStyle(color: AppColors.muted, fontSize: 12),
                       ),
                     )
@@ -2799,13 +2907,25 @@ class RecipeCard extends StatelessWidget {
                       : 'Based on your ${recipe.basedOn}',
                   style: const TextStyle(color: AppColors.muted),
                 ),
-                if (recipe.source == 'themealdb')
+                if (recipe.source == 'ai')
                   const Padding(
                     padding: EdgeInsets.only(top: 4),
                     child: Text(
-                      'Recipe by TheMealDB',
+                      'AI-generated recipe',
                       style: TextStyle(
                         color: AppColors.teal,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  )
+                else if (recipe.source == 'themealdb')
+                  const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Recipe database (TheMealDB)',
+                      style: TextStyle(
+                        color: AppColors.muted,
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),

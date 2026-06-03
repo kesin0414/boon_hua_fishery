@@ -4,7 +4,7 @@ If `https://boonhua-api.onrender.com` shows **Not Found**, the Python API is **n
 
 ## 1. Push code to GitHub
 
-Upload `boon_hua_backend` (include `main.py`, `requirements.txt`, `recipes_data.py`, `themealdb_service.py`).  
+Upload `boon_hua_backend` (include `main.py`, `ai_recipe_service.py`, `requirements.txt`, `recipes_data.py`, `themealdb_service.py`).  
 Do **not** commit `firebase_credentials.json` or `venv/`.
 
 ## 2. Create a Web Service on Render
@@ -24,15 +24,48 @@ Do **not** commit `firebase_credentials.json` or `venv/`.
 
 4. **Create Web Service** and wait for deploy to finish (green “Live”).
 
-## 3. Firebase (for inventory routes; optional for Meal Ideas)
+## 3. Deploy the latest backend (fixes `/recipes/ai-status` Not Found)
 
-Meal Ideas (`/recipes/suggest`) works **without** Firebase. Inventory needs Firebase.
+**Not Found** on `/recipes/ai-status` means Render is still running an **old** build without AI routes.
+
+1. Push the latest `boon_hua_fishery` repo to GitHub (must include `ai_recipe_service.py` and updated `main.py`).
+2. Render → your service → **Manual Deploy** → **Deploy latest commit**.
+3. Wait until status is **Live**, then open:
+   - `https://boonhua-api.onrender.com/` — JSON should include `"aiRecipes": true` after the key is set.
+   - `https://boonhua-api.onrender.com/recipes/ai-status` — should return JSON, not Not Found.
+
+**Root Directory** must be the folder that contains `main.py` (e.g. `boon_hua_backend` in a monorepo).
+
+## 4. AI recipes (required for AI Meal Ideas & chat)
+
+Add **one** of these in Render → **Environment** (never commit keys to Git):
+
+| Variable | Where to get it |
+|----------|-----------------|
+| **`GEMINI_API_KEY`** | [Google AI Studio](https://aistudio.google.com/apikey) — key usually starts with **`AIza`** |
+| **`OPENAI_API_KEY`** | [OpenAI API keys](https://platform.openai.com/api-keys) (optional alternative) |
+
+Optional: `GEMINI_MODEL` (default `gemini-2.0-flash`) or `OPENAI_MODEL` (default `gpt-4o-mini`).
+
+After saving the variable, **redeploy** the service.
+
+Check: `GET https://boonhua-api.onrender.com/recipes/ai-status` → `{"enabled":true,"provider":"gemini"}`
+
+If your key does not start with `AIza`, create a new key in **Google AI Studio** (not Cloud Console OAuth tokens).
+
+**Security:** If a key was shared in chat or email, revoke it in Google AI Studio and create a new one.
+
+Without a key, the app falls back to TheMealDB / local recipes only (no AI chat).
+
+## 5. Firebase (for inventory routes; optional for recipes)
+
+Meal Ideas (`/recipes/suggest`, `/recipes/chat`) work **without** Firebase. Inventory needs Firebase.
 
 1. Open your service → **Environment**
 2. Add variable **`FIREBASE_CREDENTIALS_JSON`**
 3. Paste the **entire** contents of `firebase_credentials.json` (one line JSON is fine)
 
-## 4. Test
+## 6. Test
 
 Open in a browser:
 
@@ -49,7 +82,7 @@ If you still see **Not Found**, check:
 - **Root Directory** points to where `main.py` lives
 - Deploy logs show no crash on startup
 
-## 5. Admin web app
+## 7. Admin web app
 
 **Settings → Mobile Recipe API** → save:
 

@@ -90,14 +90,29 @@ class FreezerRecipeItem(BaseModel):
 class RecipeRequest(BaseModel):
     items: List[FreezerRecipeItem]
 
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., examples=["user"])
+    content: str
+
+
+class RecipeChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    items: List[FreezerRecipeItem] = []
+    history: List[ChatMessage] = []
+
 # --- API ROUTES ---
 
 @app.get("/")
 def read_root():
+    from ai_recipe_service import ai_recipes_enabled
+
     return {
         "status": "Online",
         "message": "Boon Hua Fishery API is running",
         "firebase": db is not None,
+        "aiRecipes": ai_recipes_enabled(),
+        "aiStatus": "/recipes/ai-status",
         "docs": "/docs",
     }
 
@@ -163,32 +178,76 @@ def delete_item(item_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/recipes/ai-status")
+def recipe_ai_status():
+    from ai_recipe_service import ai_recipes_enabled
+
+    return {
+        "enabled": ai_recipes_enabled(),
+        "provider": _ai_provider_label(),
+    }
+
+
+def _ai_provider_label() -> str:
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return "gemini"
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return "openai"
+    return "none"
+
+
 @app.post("/recipes/suggest")
 def suggest_recipes(request: RecipeRequest):
     try:
         if not request.items:
             return {"recipes": [], "source": "none"}
 
-        recipes = _suggest_recipes_combined(request.items)
-        primary_source = "themealdb" if any(
-            recipe.get("source") == "themealdb" for recipe in recipes
-        ) else "local"
-        return {"recipes": recipes, "source": primary_source}
+        recipes, source = _suggest_recipes_combined(request.items)
+        return {"recipes": recipes, "source": source}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/recipes/chat")
+def recipe_chat(request: RecipeChatRequest):
+    from ai_recipe_service import chat_recipes_with_ai, ai_recipes_enabled
+
+    if not ai_recipes_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="AI recipe assistant is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY on the server.",
+        )
+    try:
+        history = [
+            {"role": m.role, "content": m.content}
+            for m in request.history
+            if m.role in ("user", "assistant") and m.content.strip()
+        ]
+        result = chat_recipes_with_ai(request.message, request.items, history)
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 def _suggest_recipes_combined(items: List[FreezerRecipeItem]):
+    from ai_recipe_service import suggest_recipes_with_ai, ai_recipes_enabled
     from themealdb_service import suggest_meals_for_freezer_items
+
+    if ai_recipes_enabled():
+        ai_recipes = suggest_recipes_with_ai(items, max_recipes=6)
+        if ai_recipes:
+            return ai_recipes, "ai"
 
     themealdb_recipes = suggest_meals_for_freezer_items(items, max_recipes=8)
     if themealdb_recipes:
-        return themealdb_recipes
+        return themealdb_recipes, "themealdb"
 
     local_recipes = _suggest_recipes_locally(items)
     for recipe in local_recipes:
         recipe["source"] = "local"
-    return local_recipes
+    return local_recipes, "local"
 
 
 @app.get("/recipes/database")
