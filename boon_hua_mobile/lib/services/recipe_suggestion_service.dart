@@ -35,33 +35,83 @@ class RecipeSuggestion {
   final String source;
   final List<String> keywords;
 
-  /// When [filterSpecies] is null, show all recipes.
-  bool matchesIngredientFilter(String? filterSpecies) {
-    if (filterSpecies == null || filterSpecies.trim().isEmpty) return true;
-    final name = filterSpecies.toLowerCase().trim();
-    final based = basedOn.toLowerCase();
-    if (based.contains(name) || name.contains(based)) return true;
-    for (final kw in keywords) {
-      final k = kw.toLowerCase();
-      if (name.contains(k) || k.contains(name)) return true;
-    }
-    final words = name.split(RegExp(r'[^a-z0-9]+')).where((w) => w.length >= 3);
-    for (final word in words) {
-      for (final kw in keywords) {
-        final k = kw.toLowerCase();
-        if (word.contains(k) || k.contains(word)) return true;
+  static const _speciesAliases = <String, List<String>>{
+    'salmon': ['salmon'],
+    'tuna': ['tuna'],
+    'prawn': ['prawn', 'shrimp', 'udang'],
+    'shrimp': ['prawn', 'shrimp', 'udang'],
+    'udang': ['prawn', 'shrimp', 'udang'],
+    'crab': ['crab', 'ketam'],
+    'ketam': ['crab', 'ketam'],
+    'squid': ['squid', 'sotong'],
+    'sotong': ['squid', 'sotong'],
+    'fish': ['fish', 'ikan', 'cod', 'bass', 'snapper', 'tilapia', 'mackerel'],
+    'ikan': ['fish', 'ikan'],
+    'clam': ['clam', 'lala'],
+    'mussel': ['mussel', 'shellfish'],
+    'lobster': ['lobster'],
+  };
+
+  static List<String> _termsForSpecies(String species) {
+    final lower = species.toLowerCase().trim();
+    if (lower.isEmpty) return const [];
+    final terms = <String>{lower};
+    for (final entry in _speciesAliases.entries) {
+      if (entry.key == lower ||
+          entry.value.any((alias) => lower.contains(alias))) {
+        terms.add(entry.key);
+        terms.addAll(entry.value);
       }
     }
-    final sk = searchKeyword?.toLowerCase();
-    if (sk != null && sk.isNotEmpty && name.contains(sk)) return true;
+    for (final word in lower.split(RegExp(r'[^a-z0-9]+'))) {
+      if (word.length >= 3) terms.add(word);
+    }
+    return terms.toList();
+  }
+
+  bool _matchesSpeciesName(String species) {
+    final name = species.toLowerCase().trim();
+    if (name.isEmpty) return false;
+    final based = basedOn.toLowerCase();
+    if (based.isNotEmpty && (based.contains(name) || name.contains(based))) {
+      return true;
+    }
+    final search = searchKeyword?.toLowerCase() ?? '';
+    if (search.isNotEmpty && (name.contains(search) || search.contains(name))) {
+      return true;
+    }
+
+    final freezerTerms = _termsForSpecies(name);
+    final recipeTerms = <String>{
+      ...keywords.map((k) => k.toLowerCase()),
+      ..._termsForSpecies(basedOn),
+      if (search.isNotEmpty) search,
+    };
+
+    for (final ft in freezerTerms) {
+      for (final rt in recipeTerms) {
+        if (ft == rt || ft.contains(rt) || rt.contains(ft)) return true;
+      }
+    }
+
     for (final line in ingredients) {
       final lower = line.toLowerCase();
-      if (lower.contains(name)) return true;
-      for (final kw in keywords) {
-        if (lower.contains(kw.toLowerCase())) return true;
+      for (final ft in freezerTerms) {
+        if (lower.contains(ft)) return true;
       }
     }
     return false;
+  }
+
+  bool matchesAnyFreezerItem(List<FreezerItem> items) {
+    if (items.isEmpty) return false;
+    return items.any((item) => _matchesSpeciesName(item.species));
+  }
+
+  /// When [filterSpecies] is null, caller should use [matchesAnyFreezerItem].
+  bool matchesIngredientFilter(String? filterSpecies) {
+    if (filterSpecies == null || filterSpecies.trim().isEmpty) return true;
+    return _matchesSpeciesName(filterSpecies);
   }
 
   bool ingredientFromFreezer(String line) {

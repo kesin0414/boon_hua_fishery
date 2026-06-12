@@ -56,6 +56,13 @@ export class Order {
     if (status === 'partial') return 'Partial';
     return 'Unpaid';
   }
+
+  static buyerTypeLabel(value) {
+    const hit = BUYER_TYPES.find((t) => t.value === value);
+    if (hit) return hit.label;
+    if (!value) return '—';
+    return String(value).replace(/_/g, ' ');
+  }
 }
 
 export const getOrderDateKey = Order.dateKey;
@@ -66,3 +73,4 @@ export const getOrderAmountOwing = Order.amountOwing;
 export const isOrderOutstanding = Order.isOutstanding;
 export const orderInMonthKey = Order.inMonthKey;
 export const paymentStatusReportLabel = Order.paymentStatusReportLabel;
+export const getBuyerTypeLabel = Order.buyerTypeLabel;

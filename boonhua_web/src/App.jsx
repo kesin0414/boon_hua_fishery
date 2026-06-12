@@ -36,6 +36,7 @@ import {
   isOrderOutstanding,
   orderInMonthKey,
   paymentStatusReportLabel,
+  getBuyerTypeLabel,
   BUYER_TYPES,
   SALE_TYPES,
 } from './domain/Order';
@@ -1212,7 +1213,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
   const [saleAmountRm, setSaleAmountRm] = useState('');
   const [buyerName, setBuyerName] = useState('');
   const [buyerPhone, setBuyerPhone] = useState('');
-  const [buyerType, setBuyerType] = useState('restaurant');
+  const [buyerType, setBuyerType] = useState('walk_in');
   const [saleType, setSaleType] = useState('cash');
   const [dueDate, setDueDate] = useState('');
   const [creditNotes, setCreditNotes] = useState('');
@@ -1355,7 +1356,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
         inputMode: quantityMode,
         buyerName: buyerLabel || 'Walk-in',
         buyerPhone: phoneLabel || null,
-        buyerType: saleType === 'cash' ? (buyerLabel ? buyerType : 'walk_in') : buyerType,
+        buyerType: buyerLabel ? buyerType : 'walk_in',
         saleType,
         paymentStatus,
         amountPaid,
@@ -1385,7 +1386,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       setQuantityMode('weight');
       setBuyerName('');
       setBuyerPhone('');
-      setBuyerType('restaurant');
+      setBuyerType('walk_in');
       setSaleType('cash');
       setDueDate('');
       setCreditNotes('');
@@ -1412,7 +1413,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       pricePerKg: String(parseFloat(order.pricePerKg) || 0),
       buyerName: order.buyerName === 'Walk-in' ? '' : (order.buyerName || ''),
       buyerPhone: order.buyerPhone || '',
-      buyerType: order.buyerType || 'restaurant',
+      buyerType: order.buyerType || (order.buyerName === 'Walk-in' ? 'walk_in' : 'restaurant'),
       saleType: order.saleType || 'cash',
       dueDate: order.dueDate || '',
       creditNotes: order.creditNotes || '',
@@ -1516,10 +1517,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
         totalAmount: newTotal,
         buyerName: buyerLabel || (editForm.saleType === 'cash' ? 'Walk-in' : ''),
         buyerPhone: phoneLabel || null,
-        buyerType:
-          editForm.saleType === 'cash'
-            ? (buyerLabel ? editForm.buyerType : 'walk_in')
-            : editForm.buyerType,
+        buyerType: buyerLabel ? editForm.buyerType : 'walk_in',
         saleType: editForm.saleType,
         paymentStatus: editForm.saleType === 'cash' ? 'paid' : paymentStatus,
         amountPaid,
@@ -1740,6 +1738,18 @@ const SalesRecordsPage = ({ orders, inventory }) => {
               />
             </div>
             <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Buyer type</label>
+              <select
+                value={buyerType}
+                onChange={e => setBuyerType(e.target.value)}
+                className="w-full border p-3 rounded-xl bg-white outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                {BUYER_TYPES.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
                 Phone / WhatsApp {saleType !== 'cash' ? '*' : '(optional)'}
               </label>
@@ -1754,28 +1764,14 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             </div>
             {saleType !== 'cash' && (
               <>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Buyer type</label>
-                    <select
-                      value={buyerType}
-                      onChange={e => setBuyerType(e.target.value)}
-                      className="w-full border p-3 rounded-xl bg-white"
-                    >
-                      {BUYER_TYPES.map(t => (
-                        <option key={t.value} value={t.value}>{t.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Due date</label>
-                    <input
-                      type="date"
-                      value={dueDate}
-                      onChange={e => setDueDate(e.target.value)}
-                      className="w-full border p-3 rounded-xl"
-                    />
-                  </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Due date</label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    onChange={e => setDueDate(e.target.value)}
+                    className="w-full border p-3 rounded-xl"
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes</label>
@@ -1850,6 +1846,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
                       <td className="p-3 text-slate-600 whitespace-nowrap">{order.saleDate || '-'}</td>
                       <td className="p-3 text-slate-700 text-sm max-w-[140px]">
                         <span className="font-semibold block truncate" title={order.buyerName || ''}>{order.buyerName || '—'}</span>
+                        <span className="block text-[10px] text-slate-500">{getBuyerTypeLabel(order.buyerType)}</span>
                         {order.saleType && order.saleType !== 'cash' && (
                           <span className="block text-[10px] text-amber-700 uppercase font-bold">{order.saleType}</span>
                         )}
@@ -2027,6 +2024,19 @@ const SalesRecordsPage = ({ orders, inventory }) => {
                   onChange={e => setEditForm({ ...editForm, buyerPhone: e.target.value })}
                   className="w-full border p-3 rounded-xl"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Buyer type</label>
+                <select
+                  value={editForm.buyerType}
+                  onChange={e => setEditForm({ ...editForm, buyerType: e.target.value })}
+                  className="w-full border p-3 rounded-xl bg-white"
+                >
+                  {BUYER_TYPES.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
               </div>
 
               {editForm.saleType !== 'cash' && (
@@ -2236,7 +2246,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
                       <tr key={row.name} className="border-b">
                         <td className="p-3 font-semibold">{row.name}</td>
                         <td className="p-3 text-slate-600">{row.phone || '—'}</td>
-                        <td className="p-3 capitalize text-slate-600">{row.type || '—'}</td>
+                        <td className="p-3 text-slate-600">{getBuyerTypeLabel(row.type)}</td>
                         <td className="p-3 text-right">{row.bills}</td>
                         <td className="p-3 text-right">{row.total.toFixed(2)}</td>
                         <td className="p-3 text-right text-emerald-700">{row.paid.toFixed(2)}</td>
@@ -2272,7 +2282,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
                       <tr key={row.name} className="border-b">
                         <td className="p-3 font-semibold">{row.name}</td>
                         <td className="p-3 text-slate-600">{row.phone || '—'}</td>
-                        <td className="p-3 capitalize text-slate-600">{row.type || '—'}</td>
+                        <td className="p-3 text-slate-600">{getBuyerTypeLabel(row.type)}</td>
                         <td className="p-3 text-right">{row.bills}</td>
                         <td className="p-3 text-right font-bold text-emerald-700">{row.total.toFixed(2)}</td>
                       </tr>
@@ -2477,7 +2487,7 @@ const CreditCollectionsPage = ({ orders }) => {
                         </button>
                       )}
                     </td>
-                    <td className="p-3 text-slate-600 capitalize">{row.type || '—'}</td>
+                    <td className="p-3 text-slate-600">{getBuyerTypeLabel(row.type)}</td>
                     <td className="p-3">{row.bills}</td>
                     <td className="p-3 text-right font-bold text-amber-700">RM {row.owing.toFixed(2)}</td>
                   </tr>

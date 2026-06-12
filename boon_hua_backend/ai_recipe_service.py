@@ -57,11 +57,13 @@ def _freezer_context(items: list[Any]) -> str:
 def _system_prompt() -> str:
     return (
         "You are Boon Hua Fishery's AI cooking assistant for a Malaysian seafood retailer app. "
-        "Users track seafood at home in a virtual freezer. "
-        "Recommend practical home-cooked meals using their stock, especially items expiring soon. "
-        "Prefer Malaysian/Southeast Asian flavours when appropriate (soy sauce, ginger, sambal, lime). "
-        "Be concise, safe (cook seafood thoroughly), and never invent items they do not have unless "
-        "you clearly label extra pantry items. "
+        "You ONLY help with recipes, cooking methods, ingredient substitutions, food storage, and "
+        "meal ideas using the user's virtual freezer seafood. "
+        "Do not answer politics, homework, coding, medical, or general chat. "
+        "If asked off-topic, politely say you only help with cooking and seafood meals. "
+        "Use mainly seafood they actually have in their freezer list; label any extra pantry items clearly. "
+        "Prioritise items expiring soon. Prefer Malaysian/Southeast Asian flavours when appropriate. "
+        "Be concise and remind users to cook seafood thoroughly. "
         "Always respond with valid JSON only, no markdown fences."
     )
 
@@ -88,7 +90,8 @@ def _chat_user_prompt(message: str, items: list[Any], history: list[dict[str, st
         f"{_freezer_context(items)}\n\n"
         f"{hist}\n\n"
         f"User question: {message}\n\n"
-        "Answer helpfully about what to cook, ingredients, substitutions, cooking time, or storage. "
+        "Answer only about cooking, recipes, ingredients, substitutions, cooking time, or seafood storage. "
+        "Every recipe must use seafood from their freezer list as the main protein. "
         "If you suggest a complete recipe, include it in the recipes array.\n"
         "Return JSON exactly:\n"
         '{"reply":"your answer in plain text","recipes":[]}\n'
@@ -231,28 +234,105 @@ def _call_openai(prompt: str) -> str:
     return choices[0].get("message", {}).get("content") or ""
 
 
+def ai_provider_name() -> str:
+    """Active provider label for /recipes/ai-status."""
+    choice = os.getenv("AI_PROVIDER", "auto").strip().lower()
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if choice == "openai" and openai_key:
+        return "openai"
+    if choice == "gemini" and gemini_key:
+        return "gemini"
+    if openai_key:
+        return "openai"
+    if gemini_key:
+        return "gemini"
+    return "none"
+
+
 def _llm_complete(prompt: str) -> str:
+    choice = os.getenv("AI_PROVIDER", "auto").strip().lower()
     gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
+    if choice == "openai":
+        if not openai_key:
+            raise RuntimeError("AI_PROVIDER=openai but OPENAI_API_KEY is not set on the server.")
+        return _call_openai(prompt)
+    if choice == "gemini":
+        if not gemini_key:
+            raise RuntimeError("AI_PROVIDER=gemini but GEMINI_API_KEY is not set on the server.")
+        return _call_gemini(prompt)
+
     errors: list[str] = []
+    if openai_key:
+        try:
+            return _call_openai(prompt)
+        except Exception as exc:
+            errors.append(f"OpenAI: {exc}")
     if gemini_key:
         try:
             return _call_gemini(prompt)
         except Exception as exc:
             msg = str(exc)
             errors.append(msg if msg.startswith("AI is temporarily") else f"Gemini: {msg}")
-    if openai_key:
-        try:
-            return _call_openai(prompt)
-        except Exception as exc:
-            errors.append(f"OpenAI: {exc}")
 
     if not gemini_key and not openai_key:
         raise RuntimeError(
             "No AI API key configured. Set GEMINI_API_KEY or OPENAI_API_KEY on the server."
         )
     raise RuntimeError("; ".join(errors))
+
+
+_COOKING_TOPIC_WORDS = (
+    "cook",
+    "recipe",
+    "meal",
+    "ingredient",
+    "fry",
+    "steam",
+    "bake",
+    "grill",
+    "boil",
+    "stir",
+    "sambal",
+    "freezer",
+    "seafood",
+    "fish",
+    "prawn",
+    "shrimp",
+    "crab",
+    "squid",
+    "salmon",
+    "tuna",
+    "substitut",
+    "marinat",
+    "defrost",
+    "thaw",
+    "expir",
+    "store",
+    "keep",
+    "fresh",
+    "eat",
+    "dinner",
+    "lunch",
+    "breakfast",
+    "menu",
+    "dish",
+    "sauce",
+    "spice",
+    "ikan",
+    "udang",
+    "ketam",
+    "sotong",
+)
+
+
+def _is_cooking_related(message: str) -> bool:
+    msg = message.strip().lower()
+    if not msg:
+        return False
+    return any(word in msg for word in _COOKING_TOPIC_WORDS)
 
 
 def _normalize_recipe(raw: dict[str, Any], index: int) -> dict[str, Any]:
@@ -381,7 +461,18 @@ def chat_recipes_with_ai(
             "AI recipe assistant is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY on the server."
         )
 
-    prompt = _chat_user_prompt(message.strip(), items, history or [])
+    cleaned = message.strip()
+    if not _is_cooking_related(cleaned):
+        return {
+            "reply": (
+                "I can only help with recipes and cooking — especially seafood from your virtual freezer. "
+                "Try asking what to cook tonight, how to prepare an item, or ingredient substitutions."
+            ),
+            "recipes": [],
+            "source": "policy",
+        }
+
+    prompt = _chat_user_prompt(cleaned, items, history or [])
     try:
         raw_text = _llm_complete(prompt)
     except RuntimeError as exc:

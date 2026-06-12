@@ -229,11 +229,9 @@ def recipe_ai_status():
 
 
 def _ai_provider_label() -> str:
-    if os.getenv("GEMINI_API_KEY", "").strip():
-        return "gemini"
-    if os.getenv("OPENAI_API_KEY", "").strip():
-        return "openai"
-    return "none"
+    from ai_recipe_service import ai_provider_name
+
+    return ai_provider_name()
 
 
 @app.post("/recipes/suggest")
@@ -308,11 +306,43 @@ def _all_catalog_recipes() -> List[dict]:
     return recipes
 
 
-def _suggest_recipes_combined(items: List[FreezerRecipeItem]):
-    """Return the full catalog plus extra online recipes; client filters by ingredient."""
-    from themealdb_service import suggest_meals_for_freezer_items
+def _recipe_matches_freezer(recipe: dict, items: List[FreezerRecipeItem]) -> bool:
+    """True when a catalog/online recipe fits at least one freezer species."""
+    from themealdb_service import extract_ingredient_terms
 
-    recipes = _all_catalog_recipes()
+    if not items:
+        return False
+
+    keywords = [str(k).lower() for k in (recipe.get("keywords") or []) if str(k).strip()]
+    based_on = str(recipe.get("basedOn") or "").lower()
+    search_kw = str(recipe.get("searchKeyword") or "").lower()
+
+    for item in items:
+        species = item.species.lower().strip()
+        if not species:
+            continue
+        if based_on and (based_on in species or species in based_on):
+            return True
+        if search_kw and (search_kw in species or species in search_kw):
+            return True
+        for term in extract_ingredient_terms(item.species):
+            term_l = term.lower()
+            if term_l in species or any(term_l in kw or kw in term_l for kw in keywords):
+                return True
+            if term_l in based_on or term_l in search_kw:
+                return True
+        for kw in keywords:
+            if kw in species or species in kw:
+                return True
+
+    return False
+
+
+def _suggest_recipes_combined(items: List[FreezerRecipeItem]):
+    """Return catalog + online recipes that match the user's freezer stock."""
+    from themealdb_service import extract_ingredient_terms, suggest_meals_for_freezer_items
+
+    recipes = [r for r in _all_catalog_recipes() if _recipe_matches_freezer(r, items)]
     seen_ids = {r["id"] for r in recipes}
 
     for extra in suggest_meals_for_freezer_items(items, max_recipes=24):
@@ -320,9 +350,9 @@ def _suggest_recipes_combined(items: List[FreezerRecipeItem]):
         if not meal_id or meal_id in seen_ids:
             continue
         species = extra.get("basedOn") or ""
-        from themealdb_service import extract_ingredient_terms
-
         extra["keywords"] = extract_ingredient_terms(species)
+        if not _recipe_matches_freezer(extra, items):
+            continue
         recipes.append(extra)
         seen_ids.add(meal_id)
 

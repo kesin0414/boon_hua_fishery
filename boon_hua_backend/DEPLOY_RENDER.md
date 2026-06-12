@@ -104,22 +104,27 @@ On Render → **Environment**, add:
 
 Save → **Manual Deploy**. Slightly simpler answers, often higher free limits than `gemini-2.0-flash`.
 
-**Backup: OpenAI when Gemini is busy**
-
-The server tries **Gemini first**, then **OpenAI** if Gemini fails.
+**Use ChatGPT only (recommended if you prefer OpenAI)**
 
 1. Create a key at [OpenAI API keys](https://platform.openai.com/api-keys).
-2. On Render → **Environment**, add:
+2. On Render → **Environment**, set:
 
 | Key | Value |
 |-----|--------|
+| `AI_PROVIDER` | `openai` |
 | `OPENAI_API_KEY` | `sk-…` your key |
 
 (Optional) `OPENAI_MODEL` = `gpt-4o-mini` (default).
 
-3. **Save** → **Manual Deploy**.
+3. **Remove** `GEMINI_API_KEY` (or leave it unset) so the server does not call Gemini.
+4. **Save** → **Manual Deploy**.
+5. Check `GET /recipes/ai-status` → `"provider": "openai"`.
 
-Keep `GEMINI_API_KEY` as primary; OpenAI is used automatically when Gemini returns errors (including rate limits after retries).
+**Backup: OpenAI when Gemini is busy (auto mode)**
+
+Leave `AI_PROVIDER` unset or set to `auto`. The server tries **ChatGPT (OpenAI) first**, then **Gemini** only if OpenAI fails.
+
+Set both `OPENAI_API_KEY` and `GEMINI_API_KEY` for automatic fallback when OpenAI is down or rate-limited.
 
 ## 5. Firebase (`firebase: true` on `/`)
 

@@ -36,8 +36,8 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
   static const _welcome = _UiMessage(
     role: 'assistant',
     text:
-        'Hi! I am your AI cooking assistant. Ask me what to cook, which ingredients to use, '
-        'substitutions, or how to use seafood from your virtual freezer.',
+        'Hi! I am your AI cooking assistant for recipes and seafood meals only. '
+        'Ask what to cook, how to prepare freezer items, or ingredient substitutions.',
     localOnly: true,
   );
 

@@ -2810,7 +2810,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
                       ),
                       SizedBox(height: 4),
                       Text(
-                        'Suggestions from your freezer stock',
+                        'Recipes matched to what is in your freezer',
                         style: TextStyle(color: Colors.white70, fontSize: 12),
                       ),
                     ],
@@ -2933,7 +2933,11 @@ class _RecipesScreenState extends State<RecipesScreen> {
               final result = snapshot.data ??
                   const RecipeSuggestResult(recipes: [], usedApi: false);
               final visible = result.recipes
-                  .where((r) => r.matchesIngredientFilter(_ingredientFilter))
+                  .where(
+                    (r) => _ingredientFilter == null
+                        ? r.matchesAnyFreezerItem(widget.freezerItems)
+                        : r.matchesIngredientFilter(_ingredientFilter),
+                  )
                   .toList();
 
               return Column(
@@ -2944,7 +2948,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
                       padding: const EdgeInsets.only(bottom: 10),
                       child: Text(
                         _ingredientFilter == null
-                            ? '${result.recipes.length} recipes — pick an ingredient to narrow the list.'
+                            ? '${visible.length} recipe(s) for your freezer — tap an ingredient to narrow further.'
                             : '${visible.length} recipe(s) for $_ingredientFilter',
                         style: const TextStyle(color: AppColors.muted, fontSize: 12),
                       ),
