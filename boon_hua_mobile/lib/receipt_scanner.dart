@@ -2,6 +2,9 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'models/freezer_item.dart';
+import 'models/price_history_entry.dart';
+
 class ReceiptItem {
   const ReceiptItem({
     required this.species,
@@ -44,84 +47,6 @@ class ScanResult {
   final bool cancelled;
 
   bool get isSuccess => receipt != null && receipt!.items.isNotEmpty;
-}
-
-class FreezerItem {
-  FreezerItem({
-    this.id,
-    required this.species,
-    required this.stockKg,
-    required this.purchaseDate,
-    required this.bestBeforeDate,
-    required this.pricePerKg,
-    this.iconKey = 'fish',
-    this.imagePath,
-  });
-
-  final String? id;
-  final String species;
-  final double stockKg;
-  final DateTime purchaseDate;
-  DateTime bestBeforeDate;
-  final double pricePerKg;
-  final String iconKey;
-  final String? imagePath;
-
-  int get daysRemaining {
-    return bestBeforeDate.difference(DateTime.now()).inDays;
-  }
-}
-
-class PriceHistoryEntry {
-  const PriceHistoryEntry({
-    this.id,
-    required this.species,
-    required this.pricePerKg,
-    required this.recordedAt,
-    this.quantityKg,
-    this.weightUnit = 'kg',
-  });
-
-  final String? id;
-  final String species;
-  final double pricePerKg;
-  final DateTime recordedAt;
-  final double? quantityKg;
-  final String weightUnit;
-}
-
-class PriceNormalizer {
-  const PriceNormalizer();
-
-  double calculatePricePerKg({
-    required double totalPrice,
-    required double quantityKg,
-  }) {
-    if (quantityKg <= 0) return 0;
-    return totalPrice / quantityKg;
-  }
-
-  double normalizeFromWeight({
-    required double totalPrice,
-    required double weightValue,
-    required String unit,
-  }) {
-    final quantityKg = _toKg(weightValue, unit);
-    return calculatePricePerKg(totalPrice: totalPrice, quantityKg: quantityKg);
-  }
-
-  double _toKg(double value, String unit) {
-    switch (unit.toLowerCase()) {
-      case 'g':
-        return value / 1000;
-      case 'lb':
-      case 'lbs':
-        return value * 0.453592;
-      case 'kg':
-      default:
-        return value;
-    }
-  }
 }
 
 class ReceiptParser {

@@ -1,6 +1,72 @@
 import { useState, useEffect, useMemo } from 'react';
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { BrowserRouter, Routes, Route, Link, useSearchParams } from 'react-router-dom';
+import {
+  AdminDashboardShell,
+  PageHeader,
+  StatCard,
+  AlertBanner,
+  StatusBadge,
+  generateSaleReference,
+} from './components/adminUi';
+import { RevenueTrendChart } from './components/RevenueTrendChart';
+import {
+  buildDailySeriesForForecast,
+  computeSalesForecastLocal,
+  confidenceBadgeClass,
+  confidenceLabel,
+  forecastNote,
+  forecastSubtitle,
+  DEFAULT_FORECAST_API,
+  fetchMlSalesForecast,
+} from './utils/salesForecast';
+import {
+  formatLocalDate,
+  parseLocalDate,
+  eachDayInRange,
+  getLast7DaysRange,
+  loadStoredDateRange,
+  saveStoredDateRange,
+} from './utils/dateUtils';
+import {
+  getOrderDateKey,
+  getOrderTotal,
+  getOrderPaymentStatus,
+  getOrderAmountPaid,
+  getOrderAmountOwing,
+  isOrderOutstanding,
+  orderInMonthKey,
+  paymentStatusReportLabel,
+  BUYER_TYPES,
+  SALE_TYPES,
+} from './domain/Order';
+import {
+  movementInOutKg,
+  formatMovementDateTime,
+  movementTypeLabel,
+  movementTypeBadgeClass,
+  STOCK_REMOVAL_REASONS,
+} from './domain/InventoryMovement';
+import {
+  normalizeSpeciesName,
+  formatSpeciesLabel,
+  findInventoryMatches,
+  consolidateInventoryBySpecies,
+  stockStatusForWeight,
+} from './domain/InventorySpecies';
+import {
+  inventoryService,
+  deductInventoryStock,
+  restoreInventoryStock,
+  recordInventoryHistory,
+  recordInventoryEditHistory,
+  patchSaleInventoryHistory,
+  adjustStockForSaleCorrection,
+} from './services/InventoryService';
+import {
+  normalizeWhatsAppDigits,
+  openBuyerWhatsApp,
+  buyerCollectionMessage,
+} from './utils/whatsapp';
 
 // --- FIREBASE IMPORTS ---
 import { auth, db } from './firebase';
@@ -20,131 +86,20 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocs,
+  query,
+  where,
   serverTimestamp,
 } from "firebase/firestore";
 
-const OVERVIEW_DATE_RANGE_KEY = 'boonhua_overview_date_range';
-
-function getLast7DaysRange() {
-  const end = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - 6);
-  return {
-    from: start.toISOString().slice(0, 10),
-    to: end.toISOString().slice(0, 10),
-  };
+function getMonthBounds(monthKey) {
+  const [year, month] = monthKey.split('-').map(Number);
+  const from = `${year}-${String(month).padStart(2, '0')}-01`;
+  const lastDay = new Date(year, month, 0).getDate();
+  const to = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  const label = new Date(year, month - 1, 1).toLocaleDateString('en-MY', { month: 'long', year: 'numeric' });
+  return { year, month, from, to, label };
 }
-
-function loadStoredDateRange() {
-  try {
-    const raw = localStorage.getItem(OVERVIEW_DATE_RANGE_KEY);
-    if (!raw) return null;
-    const { dateFrom, dateTo } = JSON.parse(raw);
-    if (dateFrom && dateTo) return { dateFrom, dateTo };
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
-function saveStoredDateRange(dateFrom, dateTo) {
-  try {
-    localStorage.setItem(OVERVIEW_DATE_RANGE_KEY, JSON.stringify({ dateFrom, dateTo }));
-  } catch {
-    /* ignore */
-  }
-}
-
-function normalizeSpeciesName(name) {
-  return (name || '').trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-function formatSpeciesLabel(name) {
-  return (name || '').trim().replace(/\s+/g, ' ');
-}
-
-function findInventoryMatches(inventory, species) {
-  const key = normalizeSpeciesName(species);
-  return inventory.filter(item => normalizeSpeciesName(item.species) === key);
-}
-
-/** One row per species (weights summed) for sales UI and stock checks. */
-function consolidateInventoryBySpecies(inventory) {
-  const merged = new Map();
-  inventory.forEach(item => {
-    const key = normalizeSpeciesName(item.species);
-    if (!key) return;
-    const weight = parseFloat(item.weight || 0);
-    const price = parseFloat(item.price ?? 0);
-    if (merged.has(key)) {
-      const current = merged.get(key);
-      current.weight = parseFloat(current.weight) + weight;
-      current.price = price;
-      current.sourceIds.push(item.id);
-      if (weight > 0) current.primaryId = item.id;
-    } else {
-      merged.set(key, {
-        id: item.id,
-        primaryId: item.id,
-        sourceIds: [item.id],
-        species: formatSpeciesLabel(item.species),
-        weight,
-        price,
-        status: item.status,
-      });
-    }
-  });
-  return [...merged.values()];
-}
-
-function stockStatusForWeight(weight) {
-  if (weight <= 0) return 'Out of Stock';
-  if (weight < 5) return 'Low Stock';
-  return 'In Stock';
-}
-
-async function deductInventoryStock(inventory, species, quantityKg) {
-  const matches = findInventoryMatches(inventory, species)
-    .filter(item => parseFloat(item.weight || 0) > 0)
-    .sort((a, b) => parseFloat(b.weight || 0) - parseFloat(a.weight || 0));
-
-  let remaining = quantityKg;
-  for (const item of matches) {
-    if (remaining <= 0) break;
-    const current = parseFloat(item.weight || 0);
-    const deduct = Math.min(current, remaining);
-    const nextWeight = Number((current - deduct).toFixed(1));
-    remaining = Number((remaining - deduct).toFixed(3));
-    await updateDoc(doc(db, 'inventory', item.id), {
-      weight: nextWeight,
-      status: stockStatusForWeight(nextWeight),
-      updatedAt: serverTimestamp(),
-    });
-  }
-
-  if (remaining > 0.0001) {
-    throw new Error(`Could not deduct full quantity. ${remaining.toFixed(1)} kg still unallocated in inventory.`);
-  }
-}
-
-// ==========================================
-// SHARED: Sidebar NavLink helper
-// ==========================================
-const SidebarLink = ({ to, icon, label }) => (
-  <NavLink
-    to={to}
-    className={({ isActive }) =>
-      `flex items-center px-4 py-3 rounded-xl transition-all font-semibold text-sm ${
-        isActive
-          ? 'bg-[#4379EE] text-white shadow-lg shadow-blue-900/30'
-          : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'
-      }`
-    }
-  >
-    <span className="mr-3 text-base">{icon}</span>
-    {label}
-  </NavLink>
-);
 
 // ==========================================
 // 1. SETTINGS PAGE
@@ -154,7 +109,15 @@ const SettingsPage = ({ currentUser }) => {
   const [resetSent, setResetSent] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [profileData, setProfileData] = useState({ fullName: '', phone: '' });
-  const [storeData, setStoreData] = useState({ storeName: '', address: '', openingTime: '', closingTime: '' });
+  const [storeData, setStoreData] = useState({
+    storeName: '',
+    address: '',
+    openingTime: '',
+    closingTime: '',
+    phone: '',
+    email: '',
+    contactNote: '',
+  });
   const [apiConfig, setApiConfig] = useState({ recipeApiBaseUrl: '' });
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
 
@@ -186,6 +149,9 @@ const SettingsPage = ({ currentUser }) => {
           address: data.address || '',
           openingTime: data.openingTime || '',
           closingTime: data.closingTime || '',
+          phone: data.phone || '',
+          email: data.email || '',
+          contactNote: data.contactNote || '',
         });
       }
     });
@@ -409,7 +375,18 @@ const SettingsPage = ({ currentUser }) => {
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Operating Address</label>
                 <textarea rows="3" value={storeData.address} onChange={e => setStoreData({ ...storeData, address: e.target.value })} placeholder="Enter operating address" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"></textarea>
               </div>
-              <div className="grid grid-cols-2 gap-6 pt-4 border-t border-slate-100">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Store phone / WhatsApp</label>
+                  <input type="tel" value={storeData.phone} onChange={e => setStoreData({ ...storeData, phone: e.target.value })} placeholder="e.g. 012-345 6789" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                  <p className="text-xs text-slate-500 mt-1">Shown in the mobile app <strong>Contact Us</strong> screen for consumers.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Store email</label>
+                  <input type="email" value={storeData.email} onChange={e => setStoreData({ ...storeData, email: e.target.value })} placeholder="contact@boonhua.com" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-6">
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Opening Time</label>
                   <input type="time" value={storeData.openingTime} onChange={e => setStoreData({ ...storeData, openingTime: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" />
@@ -418,6 +395,10 @@ const SettingsPage = ({ currentUser }) => {
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Closing Time</label>
                   <input type="time" value={storeData.closingTime} onChange={e => setStoreData({ ...storeData, closingTime: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Contact note (optional)</label>
+                <textarea rows={2} value={storeData.contactNote} onChange={e => setStoreData({ ...storeData, contactNote: e.target.value })} placeholder="e.g. Visit our counter at Pasar Borong…" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
               </div>
               <div className="flex justify-end pt-4">
                 <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-xl font-bold shadow-lg transition-all active:scale-95">
@@ -436,9 +417,14 @@ const SettingsPage = ({ currentUser }) => {
               Deploy <code className="bg-slate-100 px-1 rounded">boon_hua_backend</code> to Render, Railway, or similar, then paste the HTTPS URL here.
             </p>
             <form onSubmit={handleApiConfigSave} className="space-y-6">
-              <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-sm text-teal-900">
-                <p className="font-bold mb-1">Example</p>
-                <p className="font-mono text-xs">https://boonhua-api.onrender.com</p>
+              <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-sm text-teal-900 space-y-2">
+                <p className="font-bold">Current production API</p>
+                <p className="font-mono text-xs break-all">https://boon-hua-fishery.onrender.com</p>
+                <p className="text-xs text-teal-800">
+                  When configured, <code className="bg-teal-100 px-1 rounded">GET /</code> returns{' '}
+                  <code className="bg-teal-100 px-1 rounded">aiRecipes: true</code> (Gemini key on Render) and{' '}
+                  <code className="bg-teal-100 px-1 rounded">firebase: true</code> (service account JSON on Render).
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Recipe API base URL</label>
@@ -446,7 +432,7 @@ const SettingsPage = ({ currentUser }) => {
                   type="url"
                   value={apiConfig.recipeApiBaseUrl}
                   onChange={e => setApiConfig({ recipeApiBaseUrl: e.target.value })}
-                  placeholder="https://your-api.example.com"
+                  placeholder="https://boon-hua-fishery.onrender.com"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                 />
               </div>
@@ -467,6 +453,11 @@ const SettingsPage = ({ currentUser }) => {
 // 2. INVENTORY & PRICING (Firestore)
 // ==========================================
 const InventoryPage = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const ledgerTabFromUrl = () => {
+    const t = searchParams.get('tab');
+    return t === 'ledger' || t === 'history';
+  };
   const [inventory, setInventory] = useState([]);
   const [isLoading, setIsLoading] = useState(true); // FIX: loading state added
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -474,6 +465,33 @@ const InventoryPage = () => {
   const [newCatch, setNewCatch] = useState({ species: '', weight: '', price: '' });
   // FIX: track local price edits per item to avoid defaultValue/uncontrolled anti-pattern
   const [localPrices, setLocalPrices] = useState({});
+  const [activeTab, setActiveTab] = useState(() => (ledgerTabFromUrl() ? 'history' : 'stock'));
+  const [history, setHistory] = useState([]);
+  const [isRemovalOpen, setIsRemovalOpen] = useState(false);
+  const [removalForm, setRemovalForm] = useState({
+    species: '',
+    quantityKg: '',
+    reason: 'spoiled',
+    note: '',
+  });
+  const [isRemoving, setIsRemoving] = useState(false);
+
+  useEffect(() => {
+    setActiveTab(ledgerTabFromUrl() ? 'history' : 'stock');
+  }, [searchParams]);
+
+  useEffect(() => {
+    const unsubscribe = onSnapshot(collection(db, 'inventoryHistory'), (snapshot) => {
+      const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      items.sort((a, b) => {
+        const ta = a.createdAt?.toDate?.() ?? new Date(0);
+        const tb = b.createdAt?.toDate?.() ?? new Date(0);
+        return tb - ta;
+      });
+      setHistory(items);
+    });
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "inventory"), (snapshot) => {
@@ -519,6 +537,15 @@ const InventoryPage = () => {
           status: stockStatusForWeight(combinedWeight),
           updatedAt: serverTimestamp(),
         });
+        await recordInventoryHistory({
+          type: 'restock',
+          direction: 'in',
+          species,
+          quantityKg: addedWeight,
+          pricePerKg: newPrice,
+          totalAmountRm: Number((addedWeight * newPrice).toFixed(2)),
+          note: `Added ${addedWeight.toFixed(1)} kg to existing stock`,
+        });
         if (existingMatches.length > 1) {
           alert(
             `Combined ${addedWeight.toFixed(1)} kg with existing "${species}" (${combinedWeight.toFixed(1)} kg total). Price updated to RM ${newPrice.toFixed(2)}/kg.\n\nNote: ${existingMatches.length - 1} older duplicate record(s) still exist — edit or delete them in the table if needed.`
@@ -536,6 +563,15 @@ const InventoryPage = () => {
           status: stockStatusForWeight(addedWeight),
           createdAt: serverTimestamp(),
         });
+        await recordInventoryHistory({
+          type: 'restock',
+          direction: 'in',
+          species,
+          quantityKg: addedWeight,
+          pricePerKg: newPrice,
+          totalAmountRm: Number((addedWeight * newPrice).toFixed(2)),
+          note: 'New catch logged',
+        });
       }
       setIsModalOpen(false);
       setNewCatch({ species: '', weight: '', price: '' });
@@ -547,7 +583,7 @@ const InventoryPage = () => {
   const handlePriceUpdate = async (id) => {
     const newPrice = parseFloat(localPrices[id]) || 0;
     try {
-      await updateDoc(doc(db, "inventory", id), { price: newPrice });
+      await inventoryService.updateItemPrice(id, newPrice);
     } catch (error) {
       alert("Database Error: " + error.message);
     }
@@ -559,19 +595,43 @@ const InventoryPage = () => {
       weight: item.weight ?? '',
       price: item.price ?? '',
       status: item.status || 'In Stock',
+      _snapshot: {
+        species: item.species || '',
+        weight: parseFloat(item.weight) || 0,
+        price: parseFloat(item.price) || 0,
+        status: item.status || 'In Stock',
+      },
     });
   };
 
   const handleUpdateItem = async (e) => {
     e.preventDefault();
+    const newWeight = parseFloat(editItem.weight);
+    const newPrice = parseFloat(editItem.price);
+    if (Number.isNaN(newWeight) || newWeight < 0) {
+      alert('Stock (kg) must be zero or greater.');
+      return;
+    }
+    if (Number.isNaN(newPrice)) {
+      alert('Please enter a valid price.');
+      return;
+    }
+    const after = {
+      species: editItem.species,
+      weight: newWeight,
+      price: newPrice,
+      status: editItem.status,
+    };
+    const before = editItem._snapshot || after;
     try {
       await updateDoc(doc(db, "inventory", editItem.id), {
-        species: editItem.species,
-        weight: parseFloat(editItem.weight),
-        price: parseFloat(editItem.price),
-        status: editItem.status,
+        species: formatSpeciesLabel(after.species),
+        weight: Number(newWeight.toFixed(1)),
+        price: newPrice,
+        status: after.status,
         updatedAt: serverTimestamp(),
       });
+      await recordInventoryEditHistory(editItem.id, before, after);
       setEditItem(null);
     } catch (error) {
       alert("Database Error: " + error.message);
@@ -579,42 +639,209 @@ const InventoryPage = () => {
   };
 
   const handleDeleteItem = async (item) => {
-    const confirmed = window.confirm(`Delete ${item.species} from inventory?`);
+    const weight = parseFloat(item.weight || 0);
+    const confirmed = window.confirm(
+      `Delete ${item.species} from inventory?${weight > 0 ? ` This removes ${weight.toFixed(1)} kg from stock and is logged in history.` : ''}`,
+    );
     if (!confirmed) return;
     try {
+      if (weight > 0) {
+        await recordInventoryHistory({
+          type: 'inventory_delete',
+          direction: 'out',
+          species: item.species,
+          quantityKg: weight,
+          pricePerKg: parseFloat(item.price) || null,
+          totalAmountRm: weight * (parseFloat(item.price) || 0),
+          inventoryId: item.id,
+          note: `Admin deleted inventory batch — ${weight.toFixed(1)} kg removed from stock list`,
+        });
+      } else {
+        await recordInventoryHistory({
+          type: 'inventory_delete',
+          direction: 'out',
+          species: item.species,
+          quantityKg: 0,
+          inventoryId: item.id,
+          note: 'Admin deleted empty inventory batch record',
+        });
+      }
       await deleteDoc(doc(db, "inventory", item.id));
     } catch (error) {
       alert("Database Error: " + error.message);
     }
   };
 
+  const inStockItems = useMemo(
+    () => consolidateInventoryBySpecies(inventory).filter(item => parseFloat(item.weight || 0) > 0),
+    [inventory]
+  );
+
+  const removalMaxKg = useMemo(() => {
+    const item = inStockItems.find(
+      inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(removalForm.species)
+    );
+    return item ? parseFloat(item.weight || 0) : 0;
+  }, [inStockItems, removalForm.species]);
+
+  const handleStockRemoval = async (e) => {
+    e.preventDefault();
+    const quantity = parseFloat(removalForm.quantityKg) || 0;
+    if (!removalForm.species) {
+      alert('Select a species.');
+      return;
+    }
+    if (quantity <= 0) {
+      alert('Enter weight removed (kg).');
+      return;
+    }
+    if (quantity > removalMaxKg) {
+      alert(`Cannot remove more than on hand (${removalMaxKg.toFixed(1)} kg).`);
+      return;
+    }
+    const item = inStockItems.find(
+      inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(removalForm.species)
+    );
+    setIsRemoving(true);
+    try {
+      await deductInventoryStock(inventory, removalForm.species, quantity);
+      const price = parseFloat(item?.price || 0);
+      await recordInventoryHistory({
+        type: removalForm.reason,
+        direction: 'out',
+        species: removalForm.species,
+        quantityKg: quantity,
+        pricePerKg: price,
+        totalAmountRm: Number((quantity * price).toFixed(2)),
+        note: removalForm.note || movementTypeLabel(removalForm.reason),
+      });
+      setIsRemovalOpen(false);
+      setRemovalForm({ species: '', quantityKg: '', reason: 'spoiled', note: '' });
+    } catch (error) {
+      alert('Database Error: ' + error.message);
+    } finally {
+      setIsRemoving(false);
+    }
+  };
+
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col h-full relative">
-      <div className="flex justify-between items-center mb-6">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-800">Inventory & Pricing</h2>
-          <p className="text-slate-500 text-sm">Real-time sync with Cloud Firestore.</p>
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 flex flex-col h-full relative">
+      <AlertBanner variant="info" title="How stock works in this system">
+        New catch is logged in <strong>kilograms (kg)</strong> with a <strong>daily price (RM/kg)</strong>.
+        Sales and spoilage reduce kg automatically; every change (including admin deletions) is listed under Stock ledger.
+      </AlertBanner>
+      <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full font-bold">
+            {inventory.length} batch{inventory.length === 1 ? '' : 'es'}
+          </span>
+          <span className="bg-emerald-50 text-emerald-800 px-3 py-1 rounded-full font-bold">
+            {inStockItems.length} species in stock
+          </span>
         </div>
-        <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-colors">
-          + Add Catch
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setIsRemovalOpen(true)}
+            className="bg-orange-500 text-white px-4 py-2.5 rounded-xl font-bold shadow hover:bg-orange-600 transition-colors"
+          >
+            Record spoilage / loss
+          </button>
+          <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-colors">
+            + Add Catch
+          </button>
+        </div>
+      </div>
+
+      <div className="flex gap-2 mb-6 border-b border-slate-100 pb-2">
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('stock');
+            setSearchParams({});
+          }}
+          className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'stock' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+        >
+          Current stock
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('history');
+            setSearchParams({ tab: 'ledger' });
+          }}
+          className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'history' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+        >
+          Stock ledger ({history.length})
         </button>
       </div>
 
-      {/* FIX: proper loading state — no false "empty" flash */}
-      {isLoading ? (
+      {activeTab === 'history' && (
+        <div className="overflow-x-auto flex-1">
+          {history.length === 0 ? (
+            <div className="border-2 border-dashed border-slate-200 rounded-xl p-10 text-center text-slate-500">
+              No movements yet. Sales, restocks, spoilage, and admin deletions will appear here like a bank statement.
+            </div>
+          ) : (
+            <table className="bh-table w-full text-left border-collapse text-sm">
+              <thead>
+                <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
+                  <th className="p-3">Date / time</th>
+                  <th className="p-3">Transaction</th>
+                  <th className="p-3">Reference</th>
+                  <th className="p-3">Species</th>
+                  <th className="p-3 text-right text-emerald-700">Stock in (+)</th>
+                  <th className="p-3 text-right text-red-700">Stock out (−)</th>
+                  <th className="p-3 text-right">Value (RM)</th>
+                  <th className="p-3">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map(row => {
+                  const { stockIn, stockOut } = movementInOutKg(row);
+                  return (
+                  <tr key={row.id} className="border-b hover:bg-slate-50/50">
+                    <td className="p-3 text-slate-600 whitespace-nowrap">{formatMovementDateTime(row)}</td>
+                    <td className="p-3">
+                      <span className={`py-1 px-2 rounded-full text-xs font-bold ${movementTypeBadgeClass(row.type)}`}>
+                        {movementTypeLabel(row.type)}
+                      </span>
+                    </td>
+                    <td className="p-3 font-mono text-xs text-slate-600">{row.reference || row.orderId?.slice(0, 8) || '—'}</td>
+                    <td className="p-3 font-semibold">{row.species}</td>
+                    <td className="p-3 text-right font-bold text-emerald-700">
+                      {stockIn > 0 ? `+${stockIn.toFixed(1)}` : '—'}
+                    </td>
+                    <td className="p-3 text-right font-bold text-red-700">
+                      {stockOut > 0 ? `−${stockOut.toFixed(1)}` : '—'}
+                    </td>
+                    <td className="p-3 text-right">
+                      {row.totalAmountRm != null ? `RM ${Number(row.totalAmountRm).toFixed(2)}` : '—'}
+                    </td>
+                    <td className="p-3 text-slate-600 min-w-[180px]">{row.note || '—'}</td>
+                  </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'stock' && isLoading ? (
         <div className="flex-1 flex flex-col items-center justify-center">
           <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-3"></div>
           <p className="text-slate-400 text-sm font-semibold">Loading from Firestore...</p>
         </div>
-      ) : inventory.length === 0 ? (
+      ) : activeTab === 'stock' && inventory.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-xl bg-slate-50">
           <span className="text-4xl mb-2">📥</span>
           <h3 className="text-lg font-bold text-slate-700">No Inventory Found</h3>
           <p className="text-slate-500 text-sm">Click "Add Catch" to send your first data to Firebase!</p>
         </div>
-      ) : (
+      ) : activeTab === 'stock' ? (
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="bh-table w-full text-left border-collapse">
             <thead>
               <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
                 <th className="p-4 rounded-tl-lg">Species</th>
@@ -643,9 +870,7 @@ const InventoryPage = () => {
                     </div>
                   </td>
                   <td className="p-4">
-                    <span className={`py-1 px-3 rounded-full text-xs font-bold ${item.status === 'In Stock' ? 'bg-emerald-100 text-emerald-700' : 'bg-orange-100 text-orange-700'}`}>
-                      {item.status}
-                    </span>
+                    <StatusBadge status={item.status} />
                   </td>
                   <td className="p-4">
                     <div className="flex justify-end gap-2">
@@ -661,6 +886,76 @@ const InventoryPage = () => {
               ))}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {isRemovalOpen && (
+        <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white w-full max-w-md rounded-2xl p-8 shadow-2xl">
+            <h3 className="text-xl font-bold mb-2 text-slate-800">Record spoilage or loss</h3>
+            <p className="text-sm text-slate-500 mb-6">Removes weight from stock (like a sale) and logs it in inventory history.</p>
+            <form onSubmit={handleStockRemoval} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Species</label>
+                <select
+                  required
+                  value={removalForm.species}
+                  onChange={e => setRemovalForm({ ...removalForm, species: e.target.value, quantityKg: '' })}
+                  className="w-full border p-3 rounded-xl bg-white"
+                >
+                  <option value="">Select in-stock item...</option>
+                  {inStockItems.map(item => (
+                    <option key={item.id} value={item.species}>
+                      {item.species} ({parseFloat(item.weight).toFixed(1)} kg)
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Reason</label>
+                <select
+                  value={removalForm.reason}
+                  onChange={e => setRemovalForm({ ...removalForm, reason: e.target.value })}
+                  className="w-full border p-3 rounded-xl bg-white"
+                >
+                  {STOCK_REMOVAL_REASONS.map(r => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                  Weight removed (kg){removalMaxKg > 0 ? ` — max ${removalMaxKg.toFixed(1)}` : ''}
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max={removalMaxKg || undefined}
+                  required
+                  value={removalForm.quantityKg}
+                  onChange={e => setRemovalForm({ ...removalForm, quantityKg: e.target.value })}
+                  className="w-full border p-3 rounded-xl"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Note (optional)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. not fresh, ice melt, customer return"
+                  value={removalForm.note}
+                  onChange={e => setRemovalForm({ ...removalForm, note: e.target.value })}
+                  className="w-full border p-3 rounded-xl"
+                />
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button type="button" onClick={() => setIsRemovalOpen(false)} className="px-5 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-xl">Cancel</button>
+                <button type="submit" disabled={isRemoving} className="px-5 py-2 bg-orange-500 text-white font-bold rounded-xl shadow-lg hover:bg-orange-600 disabled:bg-slate-300">
+                  {isRemoving ? 'Saving...' : 'Confirm removal'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
@@ -708,7 +1003,12 @@ const InventoryPage = () => {
                   <option value="In Stock">In Stock</option>
                   <option value="Low Stock">Low Stock</option>
                   <option value="Out of Stock">Out of Stock</option>
+                  <option value="Spoiled">Spoiled (label only)</option>
+                  <option value="Wastage">Wastage (label only)</option>
                 </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  Increasing or decreasing kg is logged in <strong>Stock ledger</strong>. For spoilage with a reason, use &quot;Record spoilage / loss&quot;.
+                </p>
               </div>
               <div className="flex justify-end gap-3 mt-6">
                 <button type="button" onClick={() => setEditItem(null)} className="px-5 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-xl">Cancel</button>
@@ -783,10 +1083,9 @@ const UserManagementPage = () => {
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col h-full relative">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-slate-800">Customer Management</h2>
-        <p className="text-slate-500 text-sm">Registered users from the Mobile App — synced via Firestore.</p>
-      </div>
+      <AlertBanner variant="info" title="Live sync from mobile app">
+        Accounts appear here when customers register on the consumer app. Status changes apply immediately in Firestore.
+      </AlertBanner>
 
       <div className="grid grid-cols-1 md:grid-cols-[1fr_180px] gap-4 mb-6">
         <input
@@ -902,14 +1201,25 @@ const UserManagementPage = () => {
 // 4. SALES RECORDS (Firestore)
 // ==========================================
 const SalesRecordsPage = ({ orders, inventory }) => {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = formatLocalDate(new Date());
   const [saleForm, setSaleForm] = useState({
     saleDate: today,
     species: '',
-    quantityKg: '0',
+    quantityKg: '',
     pricePerKg: '',
   });
+  const [quantityMode, setQuantityMode] = useState('weight');
+  const [saleAmountRm, setSaleAmountRm] = useState('');
+  const [buyerName, setBuyerName] = useState('');
+  const [buyerPhone, setBuyerPhone] = useState('');
+  const [buyerType, setBuyerType] = useState('restaurant');
+  const [saleType, setSaleType] = useState('cash');
+  const [dueDate, setDueDate] = useState('');
+  const [creditNotes, setCreditNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [editingOrder, setEditingOrder] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [isUpdating, setIsUpdating] = useState(false);
 
   const availableInventory = useMemo(
     () => consolidateInventoryBySpecies(inventory).filter(
@@ -925,37 +1235,73 @@ const SalesRecordsPage = ({ orders, inventory }) => {
 
   const maxQuantityKg = selectedItem ? parseFloat(selectedItem.weight || 0) : 0;
 
-  const totalAmount = useMemo(() => {
-    const quantity = parseFloat(saleForm.quantityKg) || 0;
+  const resolvedQuantityKg = useMemo(() => {
     const price = parseFloat(saleForm.pricePerKg) || 0;
-    return quantity * price;
-  }, [saleForm.quantityKg, saleForm.pricePerKg]);
+    if (quantityMode === 'amount') {
+      const amount = parseFloat(saleAmountRm) || 0;
+      if (price <= 0) return 0;
+      return Math.min(Number((amount / price).toFixed(2)), maxQuantityKg);
+    }
+    return parseFloat(saleForm.quantityKg) || 0;
+  }, [quantityMode, saleAmountRm, saleForm.quantityKg, saleForm.pricePerKg, maxQuantityKg]);
+
+  const totalAmount = useMemo(() => {
+    if (quantityMode === 'amount') {
+      return parseFloat(saleAmountRm) || 0;
+    }
+    const price = parseFloat(saleForm.pricePerKg) || 0;
+    return resolvedQuantityKg * price;
+  }, [quantityMode, saleAmountRm, resolvedQuantityKg, saleForm.pricePerKg]);
 
   useEffect(() => {
     if (!selectedItem) return;
     const nextPrice = String(selectedItem.price);
-    const max = parseFloat(selectedItem.weight || 0);
-    const nextQty = Math.min(parseFloat(saleForm.quantityKg) || 0, max).toFixed(1);
-    setSaleForm(prev => {
-      if (prev.pricePerKg === nextPrice && prev.quantityKg === nextQty) return prev;
-      return { ...prev, pricePerKg: nextPrice, quantityKg: nextQty };
-    });
-  }, [selectedItem?.id, selectedItem?.price, selectedItem?.weight]);
+    setSaleForm(prev => (
+      prev.pricePerKg === nextPrice ? prev : { ...prev, pricePerKg: nextPrice }
+    ));
+  }, [selectedItem?.id, selectedItem?.price]);
 
   const handleSpeciesChange = (species) => {
     const item = availableInventory.find(inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(species));
     setSaleForm(prev => ({
       ...prev,
       species,
-      quantityKg: '0',
+      quantityKg: '',
       pricePerKg: item ? String(item.price) : '',
     }));
+    setSaleAmountRm('');
   };
 
-  const handleQuantityChange = (rawValue) => {
-    const parsed = parseFloat(rawValue);
-    const clamped = Number.isNaN(parsed) ? 0 : Math.min(Math.max(0, parsed), maxQuantityKg);
-    setSaleForm(prev => ({ ...prev, quantityKg: clamped.toFixed(1) }));
+  const handleQuantityModeChange = (mode) => {
+    setQuantityMode(mode);
+    setSaleAmountRm('');
+    setSaleForm(prev => ({ ...prev, quantityKg: '' }));
+  };
+
+  const handleQuantityInputChange = (rawValue) => {
+    if (rawValue === '' || /^\d*\.?\d*$/.test(rawValue)) {
+      setSaleForm(prev => ({ ...prev, quantityKg: rawValue }));
+    }
+  };
+
+  const normalizeSaleQuantityInput = (rawValue) => {
+    const trimmed = String(rawValue).trim();
+    if (trimmed === '' || trimmed === '.') return '';
+    const parsed = parseFloat(trimmed);
+    if (Number.isNaN(parsed)) return '';
+    const clamped = Math.min(Math.max(0, parsed), maxQuantityKg);
+    return String(Math.round(clamped * 100) / 100);
+  };
+
+  const handleQuantityBlur = () => {
+    setSaleForm(prev => {
+      const next = normalizeSaleQuantityInput(prev.quantityKg);
+      return prev.quantityKg === next ? prev : { ...prev, quantityKg: next };
+    });
+  };
+
+  const handleQuantitySliderChange = (rawValue) => {
+    setSaleForm(prev => ({ ...prev, quantityKg: rawValue }));
   };
 
   const handleAddSale = async (e) => {
@@ -964,29 +1310,85 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       alert('Please select a seafood item that is available in inventory and pricing.');
       return;
     }
-    const quantity = parseFloat(saleForm.quantityKg) || 0;
+    const quantity = resolvedQuantityKg;
+    if (quantityMode === 'amount') {
+      const amount = parseFloat(saleAmountRm) || 0;
+      if (amount <= 0) {
+        alert('Enter the sale amount in RM.');
+        return;
+      }
+    }
     if (quantity <= 0) {
-      alert('Quantity sold must be greater than 0 kg.');
+      alert(quantityMode === 'amount'
+        ? 'Sale amount is too small for this price/kg, or price is missing.'
+        : 'Quantity sold must be greater than 0 kg.');
       return;
     }
     if (quantity > maxQuantityKg) {
       alert(`Cannot sell more than available stock (${maxQuantityKg.toFixed(1)} kg).`);
       return;
     }
+    const buyerLabel = buyerName.trim();
+    const phoneLabel = buyerPhone.trim();
+    if (saleType !== 'cash' && !buyerLabel) {
+      alert('Enter the buyer name (restaurant / customer) for credit or pre-order sales.');
+      return;
+    }
+    if (saleType !== 'cash' && !phoneLabel) {
+      alert('Enter the buyer phone number so you can follow up on payment.');
+      return;
+    }
+    const paymentStatus = saleType === 'cash' ? 'paid' : 'unpaid';
+    const amountPaid = saleType === 'cash' ? totalAmount : 0;
     setIsSaving(true);
     try {
       await deductInventoryStock(inventory, saleForm.species, quantity);
 
-      await addDoc(collection(db, "orders"), {
+      const saleRef = generateSaleReference(saleForm.saleDate);
+      const orderRef = await addDoc(collection(db, "orders"), {
+        saleRef,
         saleDate: saleForm.saleDate,
         species: formatSpeciesLabel(saleForm.species),
         quantityKg: quantity,
         pricePerKg: parseFloat(saleForm.pricePerKg),
         totalAmount,
+        inputMode: quantityMode,
+        buyerName: buyerLabel || 'Walk-in',
+        buyerPhone: phoneLabel || null,
+        buyerType: saleType === 'cash' ? (buyerLabel ? buyerType : 'walk_in') : buyerType,
+        saleType,
+        paymentStatus,
+        amountPaid,
+        dueDate: saleType !== 'cash' && dueDate ? dueDate : null,
+        creditNotes: creditNotes.trim() || null,
         createdAt: serverTimestamp(),
       });
 
-      setSaleForm({ saleDate: today, species: '', quantityKg: '0', pricePerKg: '' });
+      await recordInventoryHistory({
+        type: 'sale',
+        direction: 'out',
+        species: saleForm.species,
+        quantityKg: quantity,
+        pricePerKg: parseFloat(saleForm.pricePerKg),
+        totalAmountRm: totalAmount,
+        inputMode: quantityMode,
+        movementDate: saleForm.saleDate,
+        orderId: orderRef.id,
+        reference: saleRef,
+        note: quantityMode === 'amount'
+          ? `${saleRef}: RM ${totalAmount.toFixed(2)} (≈ ${quantity.toFixed(1)} kg)`
+          : `${saleRef}: ${quantity.toFixed(1)} kg sold`,
+      });
+
+      setSaleForm({ saleDate: today, species: '', quantityKg: '', pricePerKg: '' });
+      setSaleAmountRm('');
+      setQuantityMode('weight');
+      setBuyerName('');
+      setBuyerPhone('');
+      setBuyerType('restaurant');
+      setSaleType('cash');
+      setDueDate('');
+      setCreditNotes('');
     } catch (error) {
       alert("Database Error: " + error.message);
     } finally {
@@ -994,10 +1396,199 @@ const SalesRecordsPage = ({ orders, inventory }) => {
     }
   };
 
+  const speciesOptionsForEdit = useMemo(() => {
+    const names = new Set(availableInventory.map(i => i.species));
+    if (editForm?.species) names.add(editForm.species);
+    if (editingOrder?.species) names.add(editingOrder.species);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [availableInventory, editForm?.species, editingOrder?.species]);
+
+  const openEditSale = (order) => {
+    setEditingOrder(order);
+    setEditForm({
+      saleDate: order.saleDate || getOrderDateKey(order) || today,
+      species: order.species || '',
+      quantityKg: String(parseFloat(order.quantityKg) || 0),
+      pricePerKg: String(parseFloat(order.pricePerKg) || 0),
+      buyerName: order.buyerName === 'Walk-in' ? '' : (order.buyerName || ''),
+      buyerPhone: order.buyerPhone || '',
+      buyerType: order.buyerType || 'restaurant',
+      saleType: order.saleType || 'cash',
+      dueDate: order.dueDate || '',
+      creditNotes: order.creditNotes || '',
+    });
+  };
+
+  const closeEditSale = () => {
+    setEditingOrder(null);
+    setEditForm(null);
+  };
+
+  const handleSaveEditSale = async (e) => {
+    e.preventDefault();
+    if (!editingOrder || !editForm) return;
+
+    const newDate = editForm.saleDate;
+    const newSpecies = formatSpeciesLabel(editForm.species);
+    const newQty = parseFloat(editForm.quantityKg) || 0;
+    const newPrice = parseFloat(editForm.pricePerKg) || 0;
+    const oldQty = parseFloat(editingOrder.quantityKg) || 0;
+    const oldSpecies = editingOrder.species || '';
+
+    if (!newDate) {
+      alert('Please set a sale date.');
+      return;
+    }
+    if (!newSpecies.trim()) {
+      alert('Please select a species.');
+      return;
+    }
+    if (newQty <= 0) {
+      alert('Quantity must be greater than 0 kg.');
+      return;
+    }
+    if (newPrice <= 0) {
+      alert('Price per kg must be greater than 0.');
+      return;
+    }
+
+    const buyerLabel = editForm.buyerName.trim();
+    const phoneLabel = editForm.buyerPhone.trim();
+    if (editForm.saleType !== 'cash' && !buyerLabel) {
+      alert('Enter buyer name for credit or pre-order sales.');
+      return;
+    }
+    if (editForm.saleType !== 'cash' && !phoneLabel) {
+      alert('Enter buyer phone for credit or pre-order sales.');
+      return;
+    }
+
+    const qtyChanged = Math.abs(newQty - oldQty) > 0.0001;
+    const speciesChanged =
+      normalizeSpeciesName(oldSpecies) !== normalizeSpeciesName(newSpecies);
+
+    if (qtyChanged || speciesChanged) {
+      const stockRow = consolidateInventoryBySpecies(inventory).find(
+        i => normalizeSpeciesName(i.species) === normalizeSpeciesName(newSpecies),
+      );
+      const availableKg = stockRow ? parseFloat(stockRow.weight || 0) : 0;
+      const sameSpecies = !speciesChanged;
+      const extraNeeded = sameSpecies ? Math.max(0, newQty - oldQty) : newQty;
+      if (extraNeeded > availableKg + 0.0001) {
+        alert(
+          `Not enough stock for ${newSpecies}. Available ${availableKg.toFixed(1)} kg, need ${extraNeeded.toFixed(1)} kg more.`,
+        );
+        return;
+      }
+    }
+
+    const newTotal = Number((newQty * newPrice).toFixed(2));
+    const paymentStatus =
+      editForm.saleType === 'cash'
+        ? 'paid'
+        : getOrderPaymentStatus(editingOrder);
+    let amountPaid = getOrderAmountPaid(editingOrder);
+    if (editForm.saleType === 'cash') {
+      amountPaid = newTotal;
+    } else if (paymentStatus === 'paid') {
+      amountPaid = newTotal;
+    } else if (amountPaid > newTotal) {
+      amountPaid = newTotal;
+    }
+
+    setIsUpdating(true);
+    try {
+      if (qtyChanged || speciesChanged) {
+        await adjustStockForSaleCorrection(
+          inventory,
+          oldSpecies,
+          oldQty,
+          newSpecies,
+          newQty,
+        );
+      }
+
+      await updateDoc(doc(db, 'orders', editingOrder.id), {
+        saleDate: newDate,
+        species: newSpecies,
+        quantityKg: Number(newQty.toFixed(2)),
+        pricePerKg: newPrice,
+        totalAmount: newTotal,
+        buyerName: buyerLabel || (editForm.saleType === 'cash' ? 'Walk-in' : ''),
+        buyerPhone: phoneLabel || null,
+        buyerType:
+          editForm.saleType === 'cash'
+            ? (buyerLabel ? editForm.buyerType : 'walk_in')
+            : editForm.buyerType,
+        saleType: editForm.saleType,
+        paymentStatus: editForm.saleType === 'cash' ? 'paid' : paymentStatus,
+        amountPaid,
+        dueDate: editForm.saleType !== 'cash' && editForm.dueDate ? editForm.dueDate : null,
+        creditNotes: editForm.creditNotes.trim() || null,
+        updatedAt: serverTimestamp(),
+      });
+
+      const ref = editingOrder.saleRef || editingOrder.id;
+      await patchSaleInventoryHistory(editingOrder.id, {
+        movementDate: newDate,
+        species: newSpecies,
+        quantityKg: Number(newQty.toFixed(2)),
+        quantityDelta: -Number(newQty.toFixed(2)),
+        pricePerKg: newPrice,
+        totalAmountRm: newTotal,
+        note:
+          editingOrder.inputMode === 'amount'
+            ? `${ref}: RM ${newTotal.toFixed(2)} (≈ ${newQty.toFixed(1)} kg) — edited`
+            : `${ref}: ${newQty.toFixed(1)} kg sold — edited`,
+      });
+
+      closeEditSale();
+    } catch (error) {
+      alert('Database Error: ' + error.message);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
   const handleDeleteSale = async (order) => {
-    const confirmed = window.confirm(`Delete sales record for ${order.species}?`);
+    const ref = order.saleRef || order.id;
+    const confirmed = window.confirm(
+      `Delete sale ${ref} (${order.species})? Stock will be restored and a reversal line will appear in the stock ledger.`,
+    );
     if (!confirmed) return;
     try {
+      const qty = parseFloat(order.quantityKg) || 0;
+      if (qty > 0) {
+        await restoreInventoryStock(
+          inventory,
+          order.species,
+          qty,
+          parseFloat(order.pricePerKg) || null,
+        );
+        await recordInventoryHistory({
+          type: 'sale_void',
+          direction: 'in',
+          species: order.species,
+          quantityKg: qty,
+          pricePerKg: parseFloat(order.pricePerKg) || null,
+          totalAmountRm: getOrderTotal(order),
+          movementDate: order.saleDate || formatLocalDate(new Date()),
+          orderId: order.id,
+          reference: ref,
+          note: `Admin deleted sale ${ref} — ${qty.toFixed(1)} kg restored to stock`,
+        });
+      } else {
+        await recordInventoryHistory({
+          type: 'sale_void',
+          direction: 'in',
+          species: order.species,
+          quantityKg: 0,
+          movementDate: order.saleDate || formatLocalDate(new Date()),
+          orderId: order.id,
+          reference: ref,
+          note: `Admin deleted sale ${ref} (no stock quantity on record)`,
+        });
+      }
       await deleteDoc(doc(db, "orders", order.id));
     } catch (error) {
       alert("Database Error: " + error.message);
@@ -1005,10 +1596,12 @@ const SalesRecordsPage = ({ orders, inventory }) => {
   };
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[420px_1fr] gap-6">
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 h-fit">
-        <h2 className="text-2xl font-bold text-slate-800">Sales Records</h2>
-        <p className="text-slate-500 text-sm mt-1 mb-6">Key in completed sales so analytics can calculate revenue and orders.</p>
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)] gap-6 min-w-0 w-full max-w-full">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 h-fit min-w-0">
+        <PageHeader
+          title="Record a sale"
+          subtitle="Match how your counter works: weigh seafood (kg) or enter the total ringgit amount."
+        />
 
         <form onSubmit={handleAddSale} className="space-y-4">
           <div>
@@ -1035,33 +1628,76 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             )}
           </div>
           <div>
-            <div className="flex justify-between items-center mb-1">
-              <label className="block text-xs font-bold text-slate-500 uppercase">Quantity Sold (kg)</label>
-              {selectedItem && (
-                <span className="text-xs text-slate-500 font-semibold">Max: {maxQuantityKg.toFixed(1)} kg</span>
-              )}
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Quantity sold</label>
+            <div className="flex gap-2 mb-3">
+              <button
+                type="button"
+                onClick={() => handleQuantityModeChange('weight')}
+                className={`flex-1 py-2 rounded-lg text-sm font-bold ${quantityMode === 'weight' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+              >
+                By weight (kg)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQuantityModeChange('amount')}
+                className={`flex-1 py-2 rounded-lg text-sm font-bold ${quantityMode === 'amount' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+              >
+                By amount (RM)
+              </button>
             </div>
-            <input
-              type="range"
-              min="0"
-              max={maxQuantityKg || 0}
-              step="0.1"
-              disabled={!selectedItem}
-              value={parseFloat(saleForm.quantityKg) || 0}
-              onChange={e => handleQuantityChange(e.target.value)}
-              className="w-full accent-blue-600 disabled:opacity-40"
-            />
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max={maxQuantityKg || undefined}
-              required
-              disabled={!selectedItem}
-              value={saleForm.quantityKg}
-              onChange={e => handleQuantityChange(e.target.value)}
-              className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 mt-2 disabled:bg-slate-100"
-            />
+            {selectedItem && (
+              <span className="text-xs text-slate-500 font-semibold block mb-2">
+                In stock: {maxQuantityKg.toFixed(1)} kg @ RM {Number(selectedItem.price).toFixed(2)}/kg
+              </span>
+            )}
+            {quantityMode === 'weight' ? (
+              <>
+                <input
+                  type="range"
+                  min="0"
+                  max={maxQuantityKg || 0}
+                  step="0.1"
+                  disabled={!selectedItem}
+                  value={Math.min(parseFloat(saleForm.quantityKg) || 0, maxQuantityKg)}
+                  onChange={e => handleQuantitySliderChange(e.target.value)}
+                  className="w-full accent-blue-600 disabled:opacity-40"
+                />
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  required
+                  disabled={!selectedItem}
+                  placeholder="e.g. 2.5"
+                  value={saleForm.quantityKg}
+                  onChange={e => handleQuantityInputChange(e.target.value)}
+                  onBlur={handleQuantityBlur}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 mt-2 disabled:bg-slate-100"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  Type kg directly (decimals OK). Max {maxQuantityKg.toFixed(1)} kg in stock — or use the slider above.
+                </p>
+              </>
+            ) : (
+              <>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  required
+                  disabled={!selectedItem}
+                  placeholder="e.g. 150.00"
+                  value={saleAmountRm}
+                  onChange={e => setSaleAmountRm(e.target.value)}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+                />
+                {selectedItem && parseFloat(saleAmountRm) > 0 && (
+                  <p className="text-xs text-blue-700 font-semibold mt-2">
+                    ≈ {resolvedQuantityKg.toFixed(1)} kg deducted from stock
+                  </p>
+                )}
+              </>
+            )}
           </div>
           <div>
             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Price (RM/kg)</label>
@@ -1075,6 +1711,89 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             />
             <p className="text-xs text-slate-500 mt-1">Uses the latest price from Inventory &amp; Pricing.</p>
           </div>
+
+          <div className="border-t border-slate-100 pt-4 space-y-3">
+            <p className="text-xs font-bold text-slate-500 uppercase">Buyer &amp; payment</p>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Sale type</label>
+              <select
+                value={saleType}
+                onChange={e => setSaleType(e.target.value)}
+                className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              >
+                {SALE_TYPES.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                Buyer name {saleType !== 'cash' ? '*' : '(optional)'}
+              </label>
+              <input
+                type="text"
+                required={saleType !== 'cash'}
+                placeholder="e.g. Restoran Sri Mutiara"
+                value={buyerName}
+                onChange={e => setBuyerName(e.target.value)}
+                className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                Phone / WhatsApp {saleType !== 'cash' ? '*' : '(optional)'}
+              </label>
+              <input
+                type="tel"
+                required={saleType !== 'cash'}
+                placeholder="e.g. 012-345 6789"
+                value={buyerPhone}
+                onChange={e => setBuyerPhone(e.target.value)}
+                className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            {saleType !== 'cash' && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Buyer type</label>
+                    <select
+                      value={buyerType}
+                      onChange={e => setBuyerType(e.target.value)}
+                      className="w-full border p-3 rounded-xl bg-white"
+                    >
+                      {BUYER_TYPES.map(t => (
+                        <option key={t.value} value={t.value}>{t.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Due date</label>
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={e => setDueDate(e.target.value)}
+                      className="w-full border p-3 rounded-xl"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes</label>
+                  <textarea
+                    rows={2}
+                    placeholder="Pre-order pickup, invoice no., etc."
+                    value={creditNotes}
+                    onChange={e => setCreditNotes(e.target.value)}
+                    className="w-full border p-3 rounded-xl resize-none"
+                  />
+                </div>
+                <AlertBanner variant="warning" title="Credit sale recorded">
+                  Stock will be deducted now. Track payment under <strong>Collections</strong> until fully paid.
+                </AlertBanner>
+              </>
+            )}
+          </div>
+
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex justify-between items-center">
             <span className="text-sm font-bold text-slate-500">Calculated Total</span>
             <span className="text-xl font-black text-emerald-600">RM {totalAmount.toFixed(2)}</span>
@@ -1086,13 +1805,13 @@ const SalesRecordsPage = ({ orders, inventory }) => {
         </form>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h3 className="text-xl font-bold text-slate-800">Recent Sales</h3>
-            <p className="text-slate-500 text-sm">These records feed the dashboard revenue chart.</p>
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 min-w-0 overflow-hidden">
+        <div className="flex flex-wrap justify-between items-start gap-3 mb-4">
+          <div className="min-w-0">
+            <h3 className="text-xl font-bold text-slate-800">Sales ledger</h3>
+            <p className="text-slate-500 text-sm">Each sale has a reference number and updates inventory history.</p>
           </div>
-          <span className="bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">{orders.length} records</span>
+          <span className="bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold shrink-0">{orders.length} records</span>
         </div>
 
         {orders.length === 0 ? (
@@ -1101,33 +1820,768 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             <p className="text-slate-500 text-sm mt-1">Save the first completed sale to start analytics.</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
+          <>
+            <p className="text-xs text-slate-500 mb-2">
+              Scroll sideways inside the table to see <strong>Edit</strong> and <strong>Delete</strong>.
+            </p>
+            <div className="bh-table-scroll rounded-xl border border-slate-100">
+              <table className="bh-table bh-sales-ledger-table w-full text-left border-collapse text-sm">
+                <thead>
+                  <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
+                    <th className="p-3 rounded-tl-lg whitespace-nowrap">Ref</th>
+                    <th className="p-3 whitespace-nowrap">Date</th>
+                    <th className="p-3 min-w-[120px]">Buyer</th>
+                    <th className="p-3 whitespace-nowrap">Phone</th>
+                    <th className="p-3 min-w-[100px]">Species</th>
+                    <th className="p-3 whitespace-nowrap">Qty</th>
+                    <th className="p-3 whitespace-nowrap">Total</th>
+                    <th className="p-3 whitespace-nowrap">Payment</th>
+                    <th className="p-3 rounded-tr-lg text-right bh-sticky-actions-header whitespace-nowrap">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...orders].sort((a, b) => (b.saleDate || '').localeCompare(a.saleDate || '')).map(order => {
+                    const owing = getOrderAmountOwing(order);
+                    const paid = getOrderAmountPaid(order);
+                    const status = getOrderPaymentStatus(order);
+                    return (
+                    <tr key={order.id} className="border-b hover:bg-slate-50/50">
+                      <td className="p-3 font-mono text-xs font-bold text-slate-600 whitespace-nowrap">{order.saleRef || '—'}</td>
+                      <td className="p-3 text-slate-600 whitespace-nowrap">{order.saleDate || '-'}</td>
+                      <td className="p-3 text-slate-700 text-sm max-w-[140px]">
+                        <span className="font-semibold block truncate" title={order.buyerName || ''}>{order.buyerName || '—'}</span>
+                        {order.saleType && order.saleType !== 'cash' && (
+                          <span className="block text-[10px] text-amber-700 uppercase font-bold">{order.saleType}</span>
+                        )}
+                      </td>
+                      <td className="p-3 text-slate-600 text-sm whitespace-nowrap">{order.buyerPhone || '—'}</td>
+                      <td className="p-3 font-semibold text-slate-800 max-w-[120px] truncate" title={order.species}>{order.species}</td>
+                      <td className="p-3 text-slate-600 whitespace-nowrap">
+                        {order.quantityKg} kg
+                        {order.inputMode === 'amount' && (
+                          <span className="block text-[10px] text-slate-400">entered as RM</span>
+                        )}
+                      </td>
+                      <td className="p-3 font-bold text-emerald-600 whitespace-nowrap">RM {getOrderTotal(order).toFixed(2)}</td>
+                      <td className="p-3 text-sm whitespace-nowrap">
+                        {status === 'paid' ? (
+                          <span className="text-emerald-700 font-bold">Paid</span>
+                        ) : (
+                          <>
+                            <span className="text-amber-700 font-bold">Owing RM {owing.toFixed(2)}</span>
+                            {paid > 0 && (
+                              <span className="block text-[10px] text-slate-500">Paid RM {paid.toFixed(2)}</span>
+                            )}
+                          </>
+                        )}
+                      </td>
+                      <td className="p-3 text-right bh-sticky-actions align-middle">
+                        <div className="flex flex-wrap justify-end gap-1.5 min-w-[200px]">
+                          {order.buyerPhone && normalizeWhatsAppDigits(order.buyerPhone) && (
+                            <button
+                              type="button"
+                              onClick={() => openBuyerWhatsApp(order.buyerPhone, buyerCollectionMessage(order))}
+                              className="bg-[#25D366]/10 text-[#128C7E] hover:bg-[#25D366]/20 px-2.5 py-1.5 rounded-lg text-xs font-bold"
+                            >
+                              WhatsApp
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => openEditSale(order)}
+                            className="bg-blue-50 text-blue-700 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSale(order)}
+                            className="bg-red-50 text-red-600 hover:bg-red-100 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+
+      {editingOrder && editForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50">
+          <div
+            className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-lg max-h-[90vh] overflow-y-auto"
+            role="dialog"
+            aria-labelledby="edit-sale-title"
+          >
+            <form onSubmit={handleSaveEditSale} className="p-6 space-y-4">
+              <div className="flex justify-between items-start gap-3">
+                <div>
+                  <h3 id="edit-sale-title" className="text-lg font-bold text-slate-800">
+                    Edit sale
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1 font-mono">
+                    {editingOrder.saleRef || editingOrder.id}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeEditSale}
+                  className="text-slate-400 hover:text-slate-700 text-xl leading-none"
+                  aria-label="Close"
+                >
+                  ×
+                </button>
+              </div>
+
+              <AlertBanner variant="info" title="Date and corrections">
+                Changing the sale date updates this row, monthly reports, and the stock ledger line for this sale.
+                If you change kg or species, stock is adjusted automatically.
+              </AlertBanner>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Sale date</label>
+                <input
+                  type="date"
+                  required
+                  value={editForm.saleDate}
+                  onChange={e => setEditForm({ ...editForm, saleDate: e.target.value })}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Species</label>
+                <select
+                  required
+                  value={editForm.species}
+                  onChange={e => setEditForm({ ...editForm, species: e.target.value })}
+                  className="w-full border p-3 rounded-xl bg-white"
+                >
+                  {speciesOptionsForEdit.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Quantity (kg)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    required
+                    value={editForm.quantityKg}
+                    onChange={e => setEditForm({ ...editForm, quantityKg: e.target.value })}
+                    className="w-full border p-3 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Price (RM/kg)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    required
+                    value={editForm.pricePerKg}
+                    onChange={e => setEditForm({ ...editForm, pricePerKg: e.target.value })}
+                    className="w-full border p-3 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Sale type</label>
+                <select
+                  value={editForm.saleType}
+                  onChange={e => setEditForm({ ...editForm, saleType: e.target.value })}
+                  className="w-full border p-3 rounded-xl bg-white"
+                >
+                  {SALE_TYPES.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Buyer name</label>
+                <input
+                  type="text"
+                  value={editForm.buyerName}
+                  onChange={e => setEditForm({ ...editForm, buyerName: e.target.value })}
+                  className="w-full border p-3 rounded-xl"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Phone</label>
+                <input
+                  type="tel"
+                  value={editForm.buyerPhone}
+                  onChange={e => setEditForm({ ...editForm, buyerPhone: e.target.value })}
+                  className="w-full border p-3 rounded-xl"
+                />
+              </div>
+
+              {editForm.saleType !== 'cash' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Due date</label>
+                  <input
+                    type="date"
+                    value={editForm.dueDate}
+                    onChange={e => setEditForm({ ...editForm, dueDate: e.target.value })}
+                    className="w-full border p-3 rounded-xl"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes</label>
+                <textarea
+                  rows={2}
+                  value={editForm.creditNotes}
+                  onChange={e => setEditForm({ ...editForm, creditNotes: e.target.value })}
+                  className="w-full border p-3 rounded-xl resize-none"
+                />
+              </div>
+
+              <div className="bg-slate-50 rounded-xl p-3 text-sm text-slate-600">
+                New total:{' '}
+                <strong className="text-emerald-700">
+                  RM {(parseFloat(editForm.quantityKg || 0) * parseFloat(editForm.pricePerKg || 0)).toFixed(2)}
+                </strong>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeEditSale}
+                  className="flex-1 py-3 rounded-xl border border-slate-200 font-bold text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdating}
+                  className="flex-1 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-bold"
+                >
+                  {isUpdating ? 'Saving…' : 'Save changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 4b. MONTHLY SALES REPORT (print / PDF)
+// ==========================================
+const MonthlySalesReportPage = ({ orders, storeInfo }) => {
+  const now = new Date();
+  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const [reportMonth, setReportMonth] = useState(defaultMonth);
+
+  const { from, to, label: monthLabel } = useMemo(() => getMonthBounds(reportMonth), [reportMonth]);
+
+  const monthOrders = useMemo(
+    () => orders
+      .filter(o => orderInMonthKey(o, reportMonth))
+      .sort((a, b) => (getOrderDateKey(a) || '').localeCompare(getOrderDateKey(b) || '')),
+    [orders, reportMonth]
+  );
+
+  const summary = useMemo(() => {
+    let totalSales = 0;
+    let collected = 0;
+    let owing = 0;
+    let paidCount = 0;
+    let unpaidCount = 0;
+    monthOrders.forEach(order => {
+      const total = getOrderTotal(order);
+      const paid = getOrderAmountPaid(order);
+      const due = getOrderAmountOwing(order);
+      totalSales += total;
+      collected += paid;
+      owing += due;
+      if (due > 0.009) unpaidCount += 1;
+      else paidCount += 1;
+    });
+    return { totalSales, collected, owing, paidCount, unpaidCount, count: monthOrders.length };
+  }, [monthOrders]);
+
+  const buyerSummary = useMemo(() => {
+    const map = new Map();
+    monthOrders.forEach(order => {
+      const name = (order.buyerName || 'Walk-in / unspecified').trim();
+      if (!map.has(name)) {
+        map.set(name, {
+          name,
+          buyerType: order.buyerType,
+          bills: 0,
+          total: 0,
+          paid: 0,
+          owing: 0,
+        });
+      }
+      const row = map.get(name);
+      row.bills += 1;
+      row.total += getOrderTotal(order);
+      row.paid += getOrderAmountPaid(order);
+      row.owing += getOrderAmountOwing(order);
+    });
+    return [...map.values()].sort((a, b) => b.owing - a.owing || b.total - a.total);
+  }, [monthOrders]);
+
+  const unpaidBuyers = buyerSummary.filter(b => b.owing > 0.009);
+  const paidBuyers = buyerSummary.filter(b => b.owing <= 0.009);
+
+  const generatedAt = new Date().toLocaleString('en-MY', { dateStyle: 'medium', timeStyle: 'short' });
+
+  const handlePrintReport = () => {
+    document.body.classList.add('bh-print-report');
+    window.print();
+    window.addEventListener('afterprint', () => {
+      document.body.classList.remove('bh-print-report');
+    }, { once: true });
+  };
+
+  return (
+    <div id="monthly-sales-report" className="bh-report-document space-y-6">
+      <div className="no-print flex flex-wrap justify-between items-start gap-4">
+        <PageHeader
+          title="Monthly sales report"
+          subtitle="Sales ledger and payment status by buyer — print or save as PDF for your records."
+        />
+        <button
+          type="button"
+          onClick={handlePrintReport}
+          disabled={monthOrders.length === 0}
+          className="bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-lg shrink-0"
+        >
+          Download PDF report
+        </button>
+      </div>
+
+      <div className="no-print bg-white rounded-2xl shadow-sm border border-slate-100 p-4 flex flex-wrap gap-4 items-end">
+        <div>
+          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Report month</label>
+          <input
+            type="month"
+            value={reportMonth}
+            onChange={e => setReportMonth(e.target.value)}
+            className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <p className="text-sm text-slate-500 pb-1">
+          Period: <strong>{from}</strong> to <strong>{to}</strong> · {monthOrders.length} sale(s)
+        </p>
+      </div>
+
+      <div className="hidden print:block bh-report-cover mb-8 pb-6 border-b-2 border-slate-800">
+        <h1 className="text-3xl font-black text-slate-900">{storeInfo.storeName || 'Boon Hua Fishery'}</h1>
+        <p className="text-lg text-slate-600 mt-1">Monthly Sales &amp; Collection Report</p>
+        <p className="text-base font-bold text-slate-800 mt-3">{monthLabel}</p>
+        <p className="text-sm text-slate-500 mt-2">Period: {from} — {to}</p>
+        {storeInfo.address && <p className="text-sm text-slate-500 mt-1">{storeInfo.address}</p>}
+        <p className="text-sm text-slate-500 mt-4">Generated: {generatedAt}</p>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 print:grid-cols-5 print:gap-2">
+        <StatCard label="Sales (month)" value={`RM ${summary.totalSales.toFixed(2)}`} hint={`${summary.count} transactions`} tone="emerald" />
+        <StatCard label="Collected" value={`RM ${summary.collected.toFixed(2)}`} hint="Paid in this month" tone="blue" />
+        <StatCard label="Still owing" value={`RM ${summary.owing.toFixed(2)}`} hint={`${summary.unpaidCount} unpaid bill(s)`} tone="orange" />
+        <StatCard label="Fully paid" value={String(summary.paidCount)} hint="Bills settled" tone="slate" />
+        <StatCard label="Buyers" value={String(buyerSummary.length)} hint="Unique names" tone="purple" />
+      </div>
+
+      {monthOrders.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-12 text-center no-print">
+          <p className="font-bold text-slate-700">No sales recorded for {monthLabel}</p>
+          <p className="text-sm text-slate-500 mt-2">Record sales under Sales, then return here to generate the report.</p>
+        </div>
+      ) : (
+        <>
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 print:shadow-none print:border-slate-300 print:break-inside-avoid">
+            <h3 className="text-lg font-bold text-slate-800 mb-2">Collection summary by buyer</h3>
+            <p className="text-sm text-slate-500 mb-4 print:text-black">
+              Who has paid and who still owes for sales dated in {monthLabel}.
+            </p>
+
+            {unpaidBuyers.length > 0 && (
+              <div className="mb-6">
+                <h4 className="text-sm font-bold uppercase text-amber-800 mb-2">Not fully paid ({unpaidBuyers.length})</h4>
+                <table className="bh-table w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-amber-50 text-slate-600 text-xs uppercase">
+                      <th className="p-3 text-left">Buyer</th>
+                      <th className="p-3 text-left">Phone</th>
+                      <th className="p-3 text-left">Type</th>
+                      <th className="p-3 text-right">Bills</th>
+                      <th className="p-3 text-right">Sales (RM)</th>
+                      <th className="p-3 text-right">Paid (RM)</th>
+                      <th className="p-3 text-right">Owing (RM)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {unpaidBuyers.map(row => (
+                      <tr key={row.name} className="border-b">
+                        <td className="p-3 font-semibold">{row.name}</td>
+                        <td className="p-3 text-slate-600">{row.phone || '—'}</td>
+                        <td className="p-3 capitalize text-slate-600">{row.type || '—'}</td>
+                        <td className="p-3 text-right">{row.bills}</td>
+                        <td className="p-3 text-right">{row.total.toFixed(2)}</td>
+                        <td className="p-3 text-right text-emerald-700">{row.paid.toFixed(2)}</td>
+                        <td className="p-3 text-right font-bold text-amber-700">{row.owing.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-amber-50/80 font-bold">
+                      <td className="p-3" colSpan={6}>Subtotal owing</td>
+                      <td className="p-3 text-right text-amber-800">RM {summary.owing.toFixed(2)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+
+            {paidBuyers.length > 0 && (
+              <div>
+                <h4 className="text-sm font-bold uppercase text-emerald-800 mb-2">Fully paid ({paidBuyers.length})</h4>
+                <table className="bh-table w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="bg-emerald-50 text-slate-600 text-xs uppercase">
+                      <th className="p-3 text-left">Buyer</th>
+                      <th className="p-3 text-left">Phone</th>
+                      <th className="p-3 text-left">Type</th>
+                      <th className="p-3 text-right">Bills</th>
+                      <th className="p-3 text-right">Total paid (RM)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paidBuyers.map(row => (
+                      <tr key={row.name} className="border-b">
+                        <td className="p-3 font-semibold">{row.name}</td>
+                        <td className="p-3 text-slate-600">{row.phone || '—'}</td>
+                        <td className="p-3 capitalize text-slate-600">{row.type || '—'}</td>
+                        <td className="p-3 text-right">{row.bills}</td>
+                        <td className="p-3 text-right font-bold text-emerald-700">{row.total.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 print:shadow-none print:border-slate-300">
+            <h3 className="text-lg font-bold text-slate-800 mb-4">Sales ledger — {monthLabel}</h3>
+            <table className="bh-table w-full text-left text-sm border-collapse print:text-xs">
               <thead>
                 <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
-                  <th className="p-4 rounded-tl-lg">Date</th>
-                  <th className="p-4">Species</th>
-                  <th className="p-4">Qty</th>
-                  <th className="p-4">Price</th>
-                  <th className="p-4">Total</th>
-                  <th className="p-4 rounded-tr-lg text-right">Actions</th>
+                  <th className="p-2">Ref</th>
+                  <th className="p-2">Date</th>
+                  <th className="p-2">Buyer</th>
+                  <th className="p-2">Phone</th>
+                  <th className="p-2">Item</th>
+                  <th className="p-2 text-right">Qty</th>
+                  <th className="p-2 text-right">Total</th>
+                  <th className="p-2 text-right">Paid</th>
+                  <th className="p-2 text-right">Owing</th>
+                  <th className="p-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {[...orders].sort((a, b) => (b.saleDate || '').localeCompare(a.saleDate || '')).map(order => (
-                  <tr key={order.id} className="border-b hover:bg-slate-50/50">
-                    <td className="p-4 text-slate-600">{order.saleDate || '-'}</td>
-                    <td className="p-4 font-semibold text-slate-800">{order.species}</td>
-                    <td className="p-4 text-slate-600">{order.quantityKg} kg</td>
-                    <td className="p-4 text-slate-600">RM {Number(order.pricePerKg || 0).toFixed(2)}</td>
-                    <td className="p-4 font-bold text-emerald-600">RM {Number(order.totalAmount || 0).toFixed(2)}</td>
-                    <td className="p-4 text-right">
-                      <button onClick={() => handleDeleteSale(order)} className="bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
-                        Delete
-                      </button>
+                {monthOrders.map(order => {
+                  const total = getOrderTotal(order);
+                  const paid = getOrderAmountPaid(order);
+                  const due = getOrderAmountOwing(order);
+                  return (
+                    <tr key={order.id} className={`border-b ${due > 0.009 ? 'print:bg-amber-50' : ''}`}>
+                      <td className="p-2 font-mono text-xs">{order.saleRef || '—'}</td>
+                      <td className="p-2">{order.saleDate || getOrderDateKey(order)}</td>
+                      <td className="p-2 font-medium">{order.buyerName || '—'}</td>
+                      <td className="p-2 text-slate-600">{order.buyerPhone || '—'}</td>
+                      <td className="p-2">{order.species}</td>
+                      <td className="p-2 text-right">{order.quantityKg} kg</td>
+                      <td className="p-2 text-right font-semibold">{total.toFixed(2)}</td>
+                      <td className="p-2 text-right text-emerald-700">{paid.toFixed(2)}</td>
+                      <td className="p-2 text-right font-bold text-amber-700">{due > 0.009 ? due.toFixed(2) : '—'}</td>
+                      <td className="p-2 font-bold text-xs uppercase">{paymentStatusReportLabel(order)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-800 font-bold">
+                  <td className="p-3" colSpan={6}>Month total</td>
+                  <td className="p-3 text-right">RM {summary.totalSales.toFixed(2)}</td>
+                  <td className="p-3 text-right text-emerald-700">RM {summary.collected.toFixed(2)}</td>
+                  <td className="p-3 text-right text-amber-700">RM {summary.owing.toFixed(2)}</td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <p className="hidden print:block text-xs text-slate-500 mt-8 pt-4 border-t border-slate-300">
+            This report lists sales by sale date in the selected month. Outstanding amounts are bills not yet fully collected — follow up via Collections.
+          </p>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ==========================================
+// 4c. CREDIT & COLLECTIONS (outstanding payments)
+// ==========================================
+const CreditCollectionsPage = ({ orders }) => {
+  const [filter, setFilter] = useState('outstanding');
+  const [payingId, setPayingId] = useState(null);
+
+  const outstandingOrders = useMemo(
+    () => orders.filter(isOrderOutstanding).sort((a, b) => (b.saleDate || '').localeCompare(a.saleDate || '')),
+    [orders]
+  );
+
+  const filteredList = useMemo(() => {
+    if (filter === 'all') return [...orders].sort((a, b) => (b.saleDate || '').localeCompare(a.saleDate || ''));
+    if (filter === 'preorder') return outstandingOrders.filter(o => o.saleType === 'preorder');
+    if (filter === 'credit') return outstandingOrders.filter(o => o.saleType === 'credit');
+    return outstandingOrders;
+  }, [orders, outstandingOrders, filter]);
+
+  const totalOwing = useMemo(
+    () => outstandingOrders.reduce((sum, o) => sum + getOrderAmountOwing(o), 0),
+    [outstandingOrders]
+  );
+
+  const byBuyer = useMemo(() => {
+    const map = new Map();
+    outstandingOrders.forEach(order => {
+      const key = (order.buyerName || 'Unknown').trim();
+      if (!map.has(key)) {
+        map.set(key, { name: key, phone: order.buyerPhone || '', type: order.buyerType, owing: 0, bills: 0 });
+      }
+      const row = map.get(key);
+      if (!row.phone && order.buyerPhone) row.phone = order.buyerPhone;
+      row.owing += getOrderAmountOwing(order);
+      row.bills += 1;
+    });
+    return [...map.values()].sort((a, b) => b.owing - a.owing);
+  }, [outstandingOrders]);
+
+  const handleMarkPaid = async (order) => {
+    const total = getOrderTotal(order);
+    const ok = window.confirm(`Mark ${order.saleRef || 'sale'} as fully paid (RM ${total.toFixed(2)})?`);
+    if (!ok) return;
+    try {
+      await updateDoc(doc(db, 'orders', order.id), {
+        paymentStatus: 'paid',
+        amountPaid: total,
+        paidAt: serverTimestamp(),
+      });
+    } catch (err) {
+      alert('Update failed: ' + err.message);
+    }
+  };
+
+  const handlePartialPayment = async (order) => {
+    const owing = getOrderAmountOwing(order);
+    const raw = window.prompt(`Record payment received (RM). Still owing: RM ${owing.toFixed(2)}`, owing.toFixed(2));
+    if (raw === null) return;
+    const paid = parseFloat(raw);
+    if (Number.isNaN(paid) || paid <= 0) {
+      alert('Enter a valid amount.');
+      return;
+    }
+    const total = getOrderTotal(order);
+    const prevPaid = getOrderAmountPaid(order);
+    const newPaid = Math.min(total, prevPaid + paid);
+    const status = newPaid >= total - 0.009 ? 'paid' : 'partial';
+    try {
+      await updateDoc(doc(db, 'orders', order.id), {
+        paymentStatus: status,
+        amountPaid: newPaid,
+        ...(status === 'paid' ? { paidAt: serverTimestamp() } : {}),
+      });
+    } catch (err) {
+      alert('Update failed: ' + err.message);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Credit & collections"
+        subtitle="Track restaurant and bulk buyers who pay later, pre-orders, and outstanding balances."
+        action={(
+          <Link to="/reports" className="text-sm font-bold text-[#4379EE] hover:underline no-print">
+            Monthly report →
+          </Link>
+        )}
+      />
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard label="Total outstanding" value={`RM ${totalOwing.toFixed(2)}`} hint={`${outstandingOrders.length} open bill(s)`} tone="orange" />
+        <StatCard label="Buyers with balance" value={String(byBuyer.length)} hint="Restaurants & credit customers" tone="slate" />
+        <StatCard label="Largest debtor" value={byBuyer[0] ? `RM ${byBuyer[0].owing.toFixed(2)}` : '—'} hint={byBuyer[0]?.name || 'None'} tone="purple" />
+      </div>
+
+      {totalOwing > 0 && (
+        <AlertBanner variant="danger" title="Collection risk">
+          Unpaid bills are not cash in hand. Follow up before extending more credit — especially large restaurant orders.
+        </AlertBanner>
+      )}
+
+      {byBuyer.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+          <h3 className="text-lg font-bold text-slate-800 mb-4">Outstanding by buyer</h3>
+          <div className="overflow-x-auto">
+            <table className="bh-table w-full text-left">
+              <thead>
+                <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
+                  <th className="p-3">Buyer</th>
+                  <th className="p-3">Phone</th>
+                  <th className="p-3">Type</th>
+                  <th className="p-3">Open bills</th>
+                  <th className="p-3 text-right">Total owing</th>
+                </tr>
+              </thead>
+              <tbody>
+                {byBuyer.map(row => (
+                  <tr key={row.name} className="border-b">
+                    <td className="p-3 font-semibold">{row.name}</td>
+                    <td className="p-3 text-slate-600">
+                      {row.phone || '—'}
+                      {row.phone && normalizeWhatsAppDigits(row.phone) && (
+                        <button
+                          type="button"
+                          onClick={() => openBuyerWhatsApp(
+                            row.phone,
+                            `Hi ${row.name}, this is Boon Hua Fishery regarding your outstanding balance of RM ${row.owing.toFixed(2)}. Please let us know when payment can be arranged. Thank you.`,
+                          )}
+                          className="block mt-1 text-[#128C7E] text-xs font-bold hover:underline"
+                        >
+                          WhatsApp
+                        </button>
+                      )}
                     </td>
+                    <td className="p-3 text-slate-600 capitalize">{row.type || '—'}</td>
+                    <td className="p-3">{row.bills}</td>
+                    <td className="p-3 text-right font-bold text-amber-700">RM {row.owing.toFixed(2)}</td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <div className="flex flex-wrap gap-2 mb-6">
+          {[
+            { id: 'outstanding', label: 'All outstanding' },
+            { id: 'credit', label: 'Credit sales' },
+            { id: 'preorder', label: 'Pre-orders' },
+            { id: 'all', label: 'All sales' },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setFilter(tab.id)}
+              className={`px-4 py-2 rounded-xl text-sm font-bold ${filter === tab.id ? 'bg-[#1E2640] text-white' : 'bg-slate-100 text-slate-600'}`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {filteredList.length === 0 ? (
+          <p className="text-slate-500 text-sm text-center py-12">
+            {filter === 'outstanding' ? 'No outstanding balances — all recorded sales are paid.' : 'No records in this view.'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="bh-table w-full text-left">
+              <thead>
+                <tr className="bg-[#F5F6FA] text-xs uppercase text-slate-500">
+                  <th className="p-3">Ref / date</th>
+                  <th className="p-3">Buyer</th>
+                  <th className="p-3">Sale</th>
+                  <th className="p-3 text-right">Total</th>
+                  <th className="p-3 text-right">Owing</th>
+                  <th className="p-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredList.map(order => {
+                  const owing = getOrderAmountOwing(order);
+                  const outstanding = isOrderOutstanding(order);
+                  return (
+                    <tr key={order.id} className={`border-b ${outstanding ? 'bg-amber-50/40' : ''}`}>
+                      <td className="p-3">
+                        <span className="font-mono text-xs font-bold">{order.saleRef || '—'}</span>
+                        <span className="block text-slate-500 text-xs">{order.saleDate}</span>
+                      </td>
+                      <td className="p-3">
+                        <span className="font-semibold">{order.buyerName || '—'}</span>
+                        {order.buyerPhone && <span className="block text-xs text-slate-500">{order.buyerPhone}</span>}
+                        {order.dueDate && <span className="block text-xs text-amber-700">Due {order.dueDate}</span>}
+                      </td>
+                      <td className="p-3 text-sm">
+                        {order.species} · {order.quantityKg} kg
+                        <span className="block text-[10px] uppercase text-slate-400">{order.saleType || 'cash'}</span>
+                        {order.creditNotes && <span className="block text-xs text-slate-500 mt-1">{order.creditNotes}</span>}
+                      </td>
+                      <td className="p-3 text-right font-bold">RM {getOrderTotal(order).toFixed(2)}</td>
+                      <td className="p-3 text-right font-bold text-amber-700">
+                        {outstanding ? `RM ${owing.toFixed(2)}` : <span className="text-emerald-600">Paid</span>}
+                      </td>
+                      <td className="p-3 text-right space-x-2 whitespace-nowrap">
+                        {order.buyerPhone && normalizeWhatsAppDigits(order.buyerPhone) && (
+                          <button
+                            type="button"
+                            onClick={() => openBuyerWhatsApp(order.buyerPhone, buyerCollectionMessage(order))}
+                            className="bg-[#25D366]/10 text-[#128C7E] px-3 py-1.5 rounded-lg text-xs font-bold"
+                          >
+                            WhatsApp
+                          </button>
+                        )}
+                        {outstanding && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={payingId === order.id}
+                              onClick={async () => { setPayingId(order.id); await handlePartialPayment(order); setPayingId(null); }}
+                              className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-lg text-xs font-bold"
+                            >
+                              Partial pay
+                            </button>
+                            <button
+                              type="button"
+                              disabled={payingId === order.id}
+                              onClick={async () => { setPayingId(order.id); await handleMarkPaid(order); setPayingId(null); }}
+                              className="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-bold"
+                            >
+                              Mark paid
+                            </button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1141,7 +2595,58 @@ const SalesRecordsPage = ({ orders, inventory }) => {
 // 5. OVERVIEW / ANALYTICS
 // FIX: now derives real stats from live Firestore inventory
 // ==========================================
-const OverviewPage = ({ inventory, customerCount, orders }) => {
+const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] }) => {
+  const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_FORECAST_API);
+  const [salesForecast, setSalesForecast] = useState(() =>
+    computeSalesForecastLocal(orders, getOrderDateKey, getOrderTotal, formatLocalDate),
+  );
+  const [forecastLoading, setForecastLoading] = useState(false);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'app_config', 'public'), (snap) => {
+      if (snap.exists() && snap.data().recipeApiBaseUrl) {
+        setApiBaseUrl(snap.data().recipeApiBaseUrl.trim() || DEFAULT_FORECAST_API);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const daily = buildDailySeriesForForecast(
+      orders,
+      getOrderDateKey,
+      getOrderTotal,
+      formatLocalDate,
+    );
+    const local = computeSalesForecastLocal(
+      orders,
+      getOrderDateKey,
+      getOrderTotal,
+      formatLocalDate,
+    );
+
+    if (!local.hasEnoughData) {
+      setSalesForecast(local);
+      setForecastLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    setForecastLoading(true);
+    fetchMlSalesForecast(apiBaseUrl, daily)
+      .then((result) => {
+        if (!cancelled) setSalesForecast(result);
+      })
+      .catch(() => {
+        if (!cancelled) setSalesForecast(local);
+      })
+      .finally(() => {
+        if (!cancelled) setForecastLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [orders, apiBaseUrl]);
+
   const [dateFrom, setDateFrom] = useState(() => {
     const stored = loadStoredDateRange();
     if (stored) return stored.dateFrom;
@@ -1166,11 +2671,16 @@ const OverviewPage = ({ inventory, customerCount, orders }) => {
 
   const filteredOrders = useMemo(() => (
     orders.filter(order => {
-      const key = order.saleDate;
-      if (!key) return true;
+      const key = getOrderDateKey(order);
+      if (!key) return false;
       return key >= dateFrom && key <= dateTo;
     })
   ), [orders, dateFrom, dateTo]);
+
+  const ordersOutsideRange = useMemo(() => {
+    if (orders.length === 0 || filteredOrders.length > 0) return 0;
+    return orders.filter(order => getOrderDateKey(order)).length;
+  }, [orders, filteredOrders.length]);
 
   // Derived stats from real Firestore data
   const totalStock = useMemo(
@@ -1178,38 +2688,41 @@ const OverviewPage = ({ inventory, customerCount, orders }) => {
     [inventory]
   );
   const totalSales = useMemo(
-    () => filteredOrders.reduce((sum, order) => sum + parseFloat(order.totalAmount || order.total || 0), 0),
+    () => filteredOrders.reduce((sum, order) => sum + getOrderTotal(order), 0),
+    [filteredOrders]
+  );
+
+  const totalOwingAll = useMemo(
+    () => orders.reduce((sum, order) => sum + getOrderAmountOwing(order), 0),
+    [orders]
+  );
+
+  const collectedInPeriod = useMemo(
+    () => filteredOrders.reduce((sum, order) => sum + getOrderAmountPaid(order), 0),
     [filteredOrders]
   );
   const salesData = useMemo(() => {
-    const start = new Date(dateFrom);
-    const end = new Date(dateTo);
-    const dayCount = Math.min(31, Math.max(1, Math.floor((end - start) / 86400000) + 1));
-    const days = [...Array(dayCount)].map((_, index) => {
-      const date = new Date(start);
-      date.setDate(start.getDate() + index);
-      const key = date.toISOString().slice(0, 10);
+    const dayKeys = eachDayInRange(dateFrom, dateTo);
+    const days = dayKeys.map(key => {
+      const date = parseLocalDate(key);
       return {
         key,
-        name: date.toLocaleDateString('en-MY', { weekday: 'short' }),
+        name: date.toLocaleDateString('en-MY', { weekday: 'short', day: 'numeric', month: 'short' }),
         revenue: 0,
       };
     });
 
     filteredOrders.forEach(order => {
-      let key = order.saleDate;
-      if (!key) {
-        const rawDate = order.createdAt?.toDate?.() || order.orderDate?.toDate?.() || order.createdAt || order.orderDate;
-        const date = rawDate ? new Date(rawDate) : null;
-        if (!date || Number.isNaN(date.getTime())) return;
-        key = date.toISOString().slice(0, 10);
-      }
+      const key = getOrderDateKey(order);
+      if (!key) return;
       const day = days.find(item => item.key === key);
-      if (day) day.revenue += parseFloat(order.totalAmount || order.total || 0);
+      if (day) day.revenue += getOrderTotal(order);
     });
 
     return days;
   }, [filteredOrders, dateFrom, dateTo]);
+
+  const chartHasRevenue = salesData.some(day => day.revenue > 0);
 
   const topSellingItems = useMemo(() => {
     const totals = {};
@@ -1217,39 +2730,63 @@ const OverviewPage = ({ inventory, customerCount, orders }) => {
       const species = order.species || 'Unknown';
       if (!totals[species]) totals[species] = { species, quantityKg: 0, revenue: 0 };
       totals[species].quantityKg += parseFloat(order.quantityKg || 0);
-      totals[species].revenue += parseFloat(order.totalAmount || 0);
+      totals[species].revenue += getOrderTotal(order);
     });
     return Object.values(totals).sort((a, b) => b.quantityKg - a.quantityKg).slice(0, 5);
   }, [filteredOrders]);
 
+  const lowStockItems = useMemo(
+    () => consolidateInventoryBySpecies(inventory).filter(item => {
+      const w = parseFloat(item.weight || 0);
+      return w > 0 && w < 5;
+    }),
+    [inventory]
+  );
+
+  const avgOrderValue = filteredOrders.length
+    ? totalSales / filteredOrders.length
+    : 0;
+
   const stats = [
-    { icon: '📦', label: 'Total Stock', value: `${totalStock} kg`, color: 'blue' },
-    { icon: '💰', label: 'Total Sales', value: `RM ${totalSales.toFixed(2)}`, color: 'emerald' },
-    { icon: '👥', label: 'Registered Users', value: customerCount, color: 'purple' },
-    { icon: '📈', label: 'Total Orders', value: filteredOrders.length, color: 'orange' },
+    { label: 'Total stock on hand', value: `${totalStock} kg`, hint: 'All species combined', tone: 'blue' },
+    { label: 'Sales value (period)', value: `RM ${totalSales.toFixed(2)}`, hint: `${filteredOrders.length} sale(s)`, tone: 'emerald' },
+    { label: 'Cash collected (period)', value: `RM ${collectedInPeriod.toFixed(2)}`, hint: 'Paid portion in range', tone: 'slate' },
+    { label: 'Outstanding balance', value: `RM ${totalOwingAll.toFixed(2)}`, hint: 'All unpaid bills', tone: 'orange' },
+    { label: 'Mobile customers', value: String(customerCount), hint: 'Registered accounts', tone: 'purple' },
   ];
 
-  const colorMap = {
-    blue: 'bg-blue-100 text-blue-600',
-    emerald: 'bg-emerald-100 text-emerald-600',
-    purple: 'bg-purple-100 text-purple-600',
-    orange: 'bg-orange-100 text-orange-600',
-  };
+  const reportMovements = useMemo(() => (
+    inventoryHistory.filter(row => {
+      const key = row.movementDate;
+      if (!key) return true;
+      return key >= dateFrom && key <= dateTo;
+    })
+  ), [inventoryHistory, dateFrom, dateTo]);
+
+  const lossInPeriodKg = useMemo(() => (
+    reportMovements
+      .filter(row => ['spoiled', 'wastage', 'damaged', 'expired', 'other'].includes(row.type))
+      .reduce((sum, row) => sum + parseFloat(row.quantityKg || 0), 0)
+  ), [reportMovements]);
 
   return (
-    <div id="dashboard-overview" className="space-y-6 print:m-0 print:p-0 print:space-y-4">
-      <div className="flex justify-between items-end print:mb-2">
-        <h2 className="text-2xl font-bold text-slate-800 print:text-xl">Dashboard Overview</h2>
-        <button onClick={() => window.print()} className="bg-slate-800 hover:bg-slate-900 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center shadow-lg active:scale-95 print:hidden">
-          📄 Generate PDF Report
-        </button>
-      </div>
+    <div id="dashboard-overview" className="space-y-6 min-w-0 max-w-full overflow-x-hidden">
+      {lowStockItems.length > 0 && (
+        <AlertBanner variant="warning" title="Low stock alert">
+          {lowStockItems.map(i => i.species).join(', ')} — below 5 kg. Consider restocking or promoting sales.
+        </AlertBanner>
+      )}
 
-      <p className="hidden print:block text-sm text-slate-600 -mt-4 mb-2">
-        Report period: {dateFrom} to {dateTo}
-      </p>
+      {lossInPeriodKg > 0 && (
+        <AlertBanner variant="danger" title="Stock losses in selected period">
+          {lossInPeriodKg.toFixed(1)} kg recorded as spoilage, wastage, or damage.{' '}
+          <Link to="/inventory?tab=ledger" className="font-bold underline">
+            View Stock ledger →
+          </Link>
+        </AlertBanner>
+      )}
 
-      <div className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100 print:hidden">
+      <div className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100">
         <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-4 items-end">
           <div>
             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">From</label>
@@ -1265,65 +2802,140 @@ const OverviewPage = ({ inventory, customerCount, orders }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 print:grid-cols-2 print:gap-4">
-        {stats.map((stat) => (
-          <div key={stat.label} className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex justify-between items-center print:break-inside-avoid print:p-4 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:border-blue-100 group">
-            <div className={`w-14 h-14 rounded-2xl ${colorMap[stat.color]} flex items-center justify-center text-2xl transition-transform group-hover:scale-110`}>
-              {stat.icon}
-            </div>
-            <div className="text-right">
-              <p className="text-sm text-slate-500 font-semibold mb-1">{stat.label}</p>
-              <h3 className={`text-2xl font-bold ${stat.color === 'emerald' ? 'text-emerald-600' : 'text-slate-800'}`}>
-                {stat.value}
-              </h3>
-              {stat.note && <p className="text-[10px] text-slate-400 mt-0.5">{stat.note}</p>}
-            </div>
-          </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5 gap-4">
+        {stats.map(stat => (
+          <StatCard key={stat.label} label={stat.label} value={stat.value} hint={stat.hint} tone={stat.tone} />
         ))}
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-100 print:break-inside-avoid">
-        <h3 className="text-lg font-bold text-slate-800 mb-6 print:mb-3">Revenue Trends</h3>
-        {filteredOrders.length === 0 ? (
-          <div className="h-[300px] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-center print:h-auto print:py-8">
-            <h4 className="text-slate-700 font-bold">No Sales Data Yet</h4>
-            <p className="text-slate-500 text-sm mt-1">Revenue charts will appear when real orders are saved in Firebase.</p>
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={300} className="print:!h-[220px] min-h-[220px]">
-            <BarChart data={salesData}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dx={-10} tickFormatter={(val) => `RM${val}`} />
-              <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', fontWeight: 'bold' }} formatter={(value) => [`RM ${Number(value).toFixed(2)}`, "Revenue"]} />
-              <defs>
-                <linearGradient id="revenueGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#5DC0AE" />
-                  <stop offset="100%" stopColor="#4379EE" />
-                </linearGradient>
-              </defs>
-              <Bar dataKey="revenue" fill="url(#revenueGradient)" radius={[8, 8, 0, 0]} barSize={44} />
-            </BarChart>
-          </ResponsiveContainer>
-        )}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 min-w-0 items-stretch">
+        <div className="xl:col-span-2 bg-white rounded-2xl shadow-sm p-6 border border-slate-100 print:break-inside-avoid min-w-0">
+          <h3 className="text-lg font-bold text-slate-800 mb-1 print:mb-3">Revenue Trends</h3>
+          <p className="text-xs text-slate-500 mb-4">Daily sales value (RM) for {dateFrom} — {dateTo}</p>
+          {ordersOutsideRange > 0 && (
+            <AlertBanner variant="info" title="Date range has no sales">
+              You have {ordersOutsideRange} sale(s) outside {dateFrom} to {dateTo}. Click <strong>Last 7 Days</strong> or widen the dates to see them on the chart.
+            </AlertBanner>
+          )}
+          {filteredOrders.length === 0 ? (
+            <div className="h-[300px] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-center print:h-auto print:py-8">
+              <h4 className="text-slate-700 font-bold">No sales in this period</h4>
+              <p className="text-slate-500 text-sm mt-1">
+                {orders.length === 0
+                  ? 'Record sales under Sales — charts update from Firebase orders.'
+                  : 'Adjust the date range above or click Last 7 Days.'}
+              </p>
+            </div>
+          ) : salesData.length === 0 ? (
+            <div className="h-[300px] border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-center">
+              <h4 className="text-slate-700 font-bold">Invalid date range</h4>
+              <p className="text-slate-500 text-sm mt-1">Set From before To (max 31 days shown).</p>
+            </div>
+          ) : !chartHasRevenue ? (
+            <div className="py-8 text-center">
+              <p className="text-slate-600 font-semibold">{filteredOrders.length} sale(s) in range but RM 0 total</p>
+              <p className="text-slate-500 text-sm mt-1">Check that each sale has a total amount saved.</p>
+              <RevenueTrendChart data={salesData} />
+            </div>
+          ) : (
+            <RevenueTrendChart data={salesData} />
+          )}
+        </div>
+
+        <div className="xl:col-span-1 bg-white rounded-2xl shadow-sm p-6 border border-slate-100 print:break-inside-avoid print:page-break-inside-avoid flex flex-col min-w-0 min-h-[300px] xl:min-h-0">
+          <h3 className="text-lg font-bold text-slate-800 mb-1 shrink-0">Top-Selling Seafood</h3>
+          <p className="text-xs text-slate-500 mb-4 shrink-0">By kg sold · {dateFrom} — {dateTo}</p>
+          {topSellingItems.length === 0 ? (
+            <p className="text-slate-500 text-sm flex-1">Top-selling items will appear after sales records are saved.</p>
+          ) : (
+            <div className="space-y-3 print:space-y-2 flex-1 overflow-y-auto min-h-0 pr-1">
+              {topSellingItems.map(item => (
+                <div key={item.species} className="flex items-center justify-between border border-slate-100 rounded-xl p-4 print:break-inside-avoid print:p-3">
+                  <div className="min-w-0 pr-2">
+                    <p className="font-bold text-slate-800 truncate">{item.species}</p>
+                    <p className="text-xs text-slate-500">{item.quantityKg.toFixed(1)} kg sold</p>
+                  </div>
+                  <p className="font-black text-emerald-600 shrink-0">RM {item.revenue.toFixed(2)}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-100 print:break-inside-avoid print:page-break-inside-avoid">
-        <h3 className="text-lg font-bold text-slate-800 mb-4">Top-Selling Seafood</h3>
-        {topSellingItems.length === 0 ? (
-          <p className="text-slate-500 text-sm">Top-selling items will appear after sales records are saved.</p>
-        ) : (
-          <div className="space-y-3 print:space-y-2">
-            {topSellingItems.map(item => (
-              <div key={item.species} className="flex items-center justify-between border border-slate-100 rounded-xl p-4 print:break-inside-avoid print:p-3">
-                <div>
-                  <p className="font-bold text-slate-800">{item.species}</p>
-                  <p className="text-xs text-slate-500">{item.quantityKg.toFixed(1)} kg sold</p>
-                </div>
-                <p className="font-black text-emerald-600">RM {item.revenue.toFixed(2)}</p>
-              </div>
-            ))}
+      <div className="bg-white rounded-2xl shadow-sm p-6 border border-slate-100 print:break-inside-avoid min-w-0">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-800">Sales prediction</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              {forecastSubtitle(salesForecast)}
+            </p>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {forecastLoading && (
+              <span className="text-xs font-semibold text-slate-400">Refreshing estimate…</span>
+            )}
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide ${confidenceBadgeClass(salesForecast.confidence)}`}
+            >
+              {confidenceLabel(salesForecast.confidence)} estimate
+            </span>
+          </div>
+        </div>
+
+        {!salesForecast.hasEnoughData ? (
+          <div className="border-2 border-dashed border-slate-200 rounded-xl bg-slate-50 p-8 text-center">
+            <p className="font-bold text-slate-700">Not enough sales history yet</p>
+            <p className="text-sm text-slate-500 mt-2 max-w-md mx-auto">
+              Record sales under <strong>Sales</strong> for a few days — we will estimate the next
+              7 days automatically.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+              <div className="rounded-xl border border-violet-100 bg-violet-50/60 p-4">
+                <p className="text-xs font-bold text-violet-700 uppercase">Next 7 days (predicted)</p>
+                <p className="text-2xl font-black text-violet-900 mt-1">
+                  RM {salesForecast.next7Total.toFixed(2)}
+                </p>
+                <p className="text-xs text-violet-600 mt-1">
+                  ~RM {salesForecast.perDay.toFixed(2)} / day
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                <p className="text-xs font-bold text-slate-500 uppercase">Last 7 days (actual)</p>
+                <p className="text-2xl font-black text-slate-800 mt-1">
+                  RM {salesForecast.last7Total.toFixed(2)}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Avg RM {salesForecast.avg7.toFixed(2)} / day
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                <p className="text-xs font-bold text-slate-500 uppercase">28-day average</p>
+                <p className="text-2xl font-black text-slate-800 mt-1">
+                  RM {salesForecast.avg28.toFixed(2)}
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  {salesForecast.daysWithSales} day(s) with sales recorded
+                  {salesForecast.trendPct != null && (
+                    <>
+                      {' '}
+                      · recent week{' '}
+                      {salesForecast.trendPct >= 0 ? '↑' : '↓'}
+                      {Math.abs(salesForecast.trendPct).toFixed(0)}% vs 28-day avg
+                    </>
+                  )}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">{forecastNote(salesForecast)}</p>
+            <RevenueTrendChart
+              data={salesForecast.chartSeries}
+              showForecastLegend
+            />
+          </>
         )}
       </div>
     </div>
@@ -1345,6 +2957,16 @@ export default function App() {
   const [inventory, setInventory] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [inventoryHistory, setInventoryHistory] = useState([]);
+  const [storeInfo, setStoreInfo] = useState({
+    storeName: 'Boon Hua Fishery',
+    address: '',
+    openingTime: '',
+    closingTime: '',
+    phone: '',
+    email: '',
+    contactNote: '',
+  });
 
   // Monitor auth state
   useEffect(() => {
@@ -1367,7 +2989,24 @@ export default function App() {
     const u3 = onSnapshot(collection(db, "orders"), snap => {
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
-    return () => { u1(); u2(); u3(); };
+    const u4 = onSnapshot(collection(db, "inventoryHistory"), snap => {
+      setInventoryHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    const u5 = onSnapshot(doc(db, 'storeSettings', 'main'), snap => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setStoreInfo({
+          storeName: data.storeName || 'Boon Hua Fishery',
+          address: data.address || '',
+          openingTime: data.openingTime || '',
+          closingTime: data.closingTime || '',
+          phone: data.phone || '',
+          email: data.email || '',
+          contactNote: data.contactNote || '',
+        });
+      }
+    });
+    return () => { u1(); u2(); u3(); u4(); u5(); };
   }, [currentUser]);
 
   const handleInputChange = (e) => {
@@ -1404,8 +3043,9 @@ export default function App() {
   // Show nothing while Firebase resolves session
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#F5F6FA] flex items-center justify-center">
-        <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      <div className="min-h-screen bg-[#F0F2F8] flex flex-col items-center justify-center gap-4">
+        <div className="w-11 h-11 border-4 border-[#4379EE] border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm font-semibold text-slate-500">Loading Boon Hua Admin…</p>
       </div>
     );
   }
@@ -1420,14 +3060,19 @@ export default function App() {
         </div>
         <div className="bg-white/95 backdrop-blur w-full max-w-md rounded-2xl shadow-2xl p-8 border border-white/60 relative z-10 bh-card-enter">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center bg-gradient-to-br from-[#2F3C95] to-[#4379EE] text-white w-14 h-14 rounded-2xl mb-3 shadow-lg shadow-blue-900/30">
-              <span className="text-3xl">🐟</span>
-            </div>
-            <h1 className="text-xl font-black tracking-tight uppercase">BOON HUA FISHERY</h1>
-            <p className="text-[10px] font-bold tracking-widest text-slate-400 mt-1 uppercase">Admin Portal</p>
+            <img
+              src="/app-icon.png"
+              alt="Boon Hua Fishery"
+              className="w-14 h-14 rounded-2xl mb-3 shadow-lg shadow-blue-900/30 object-cover"
+            />
+            <h1 className="text-xl font-black tracking-tight uppercase">Boon Hua Fishery</h1>
+            <p className="text-[10px] font-bold tracking-widest text-slate-400 mt-1 uppercase">Admin Only</p>
           </div>
+          <p className="text-xs text-slate-500 text-center mb-6 leading-relaxed">
+            One connected platform.
+          </p>
 
-          <h2 className="text-xl font-bold mb-6 text-center uppercase tracking-wide">
+          <h2 className="text-lg font-bold mb-6 text-center">
             {authView === 'login' ? 'System Sign In' : 'Reset Password'}
           </h2>
 
@@ -1479,65 +3124,17 @@ export default function App() {
   // --- DASHBOARD LAYOUT ---
   return (
     <BrowserRouter>
-      <div className="flex h-screen bg-[#F5F6FA] font-sans text-slate-900 overflow-hidden print:h-auto print:min-h-0 print:overflow-visible print:block">
-
-        {/* SIDEBAR */}
-        <aside className="w-[250px] bg-[#1E2640] text-white flex flex-col z-20 print:hidden">
-          <div className="h-[76px] flex items-center px-8 border-b border-slate-700/50">
-            <span className="text-2xl mr-3">🐟</span>
-            <h1 className="text-xl font-bold tracking-wide">Boon Hua Fishery</h1>
-          </div>
-
-          <nav className="flex-1 px-4 py-8 space-y-1">
-            <p className="px-4 text-xs text-slate-500 font-semibold mb-4 uppercase tracking-wider">Admin Modules</p>
-            {/* FIX: NavLink with isActive highlight instead of focus: */}
-            <SidebarLink to="/" icon="📊" label="Overview" />
-            <SidebarLink to="/inventory" icon="📦" label="Inventory & Pricing" />
-            <SidebarLink to="/sales" icon="💰" label="Sales Records" />
-            <SidebarLink to="/users" icon="👥" label="User Management" />
-            <SidebarLink to="/settings" icon="⚙️" label="Settings" />
-          </nav>
-
-          {/* FIX: Logout is now a prominent red button */}
-          <div className="p-4 mb-4">
-            <button
-              onClick={handleLogout}
-              className="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-bold transition-all flex items-center justify-center shadow-lg shadow-red-900/30 active:scale-95"
-            >
-              <span className="mr-2">🚪</span> Log Out
-            </button>
-          </div>
-        </aside>
-
-        {/* RIGHT CONTENT AREA */}
-        <div className="flex-1 flex flex-col overflow-hidden print:overflow-visible print:h-auto">
-
-          <header className="h-[76px] bg-white flex items-center justify-between px-8 shadow-sm z-10 print:hidden">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-[#4379EE] flex items-center justify-center text-white font-bold shadow-md">
-                {currentUser?.email ? currentUser.email.charAt(0).toUpperCase() : 'A'}
-              </div>
-              <div>
-                <p className="text-sm font-bold leading-tight">
-                  {currentUser?.displayName || 'System Admin'}
-                </p>
-                <p className="text-[10px] uppercase font-bold tracking-widest text-slate-400">{currentUser?.email}</p>
-              </div>
-            </div>
-          </header>
-
-          <main className="flex-1 p-8 overflow-y-auto print:p-4 print:overflow-visible print:h-auto print:max-h-none">
-            <Routes>
-              {/* FIX: pass live data to OverviewPage so stats are real */}
-              <Route path="/" element={<OverviewPage inventory={inventory} customerCount={customers.length} orders={orders} />} />
-              <Route path="/inventory" element={<InventoryPage />} />
-              <Route path="/sales" element={<SalesRecordsPage orders={orders} inventory={inventory} />} />
-              <Route path="/users" element={<UserManagementPage />} />
-              <Route path="/settings" element={<SettingsPage currentUser={currentUser} />} />
-            </Routes>
-          </main>
-        </div>
-      </div>
+      <AdminDashboardShell storeInfo={storeInfo} currentUser={currentUser} onLogout={handleLogout}>
+        <Routes>
+          <Route path="/" element={<OverviewPage inventory={inventory} customerCount={customers.length} orders={orders} inventoryHistory={inventoryHistory} />} />
+          <Route path="/inventory" element={<InventoryPage />} />
+          <Route path="/sales" element={<SalesRecordsPage orders={orders} inventory={inventory} />} />
+          <Route path="/credit" element={<CreditCollectionsPage orders={orders} />} />
+          <Route path="/reports" element={<MonthlySalesReportPage orders={orders} storeInfo={storeInfo} />} />
+          <Route path="/users" element={<UserManagementPage />} />
+          <Route path="/settings" element={<SettingsPage currentUser={currentUser} />} />
+        </Routes>
+      </AdminDashboardShell>
     </BrowserRouter>
   );
 }

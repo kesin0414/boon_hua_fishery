@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
-import 'app_widgets.dart';
+import 'api_config.dart';
 import 'recipe_ai_service.dart';
+import 'theme/app_colors.dart';
 import 'recipe_chat_history.dart';
 
 class RecipeAiChefScreen extends StatefulWidget {
@@ -26,8 +29,9 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
   final List<_UiMessage> _messages = [];
   bool _sending = false;
   bool _loadingHistory = true;
-  bool? _aiEnabled;
-  bool _apiNeedsDeploy = false;
+  int _cooldownSeconds = 0;
+  Timer? _cooldownTimer;
+  RecipeAiAvailability _availability = RecipeAiAvailability.unknown;
 
   static const _welcome = _UiMessage(
     role: 'assistant',
@@ -53,7 +57,9 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
 
   Future<void> _loadHistory() async {
     try {
-      final saved = await _historyStore.load();
+      final saved = await _historyStore
+          .load()
+          .timeout(const Duration(seconds: 12), onTimeout: () => []);
       if (!mounted) return;
       setState(() {
         _messages.clear();
@@ -112,16 +118,37 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
   }
 
   Future<void> _checkAi() async {
-    final enabled = await _service.isAiEnabled();
+    await ApiConfig.syncRemoteConfig();
+    final availability = await _service.checkAvailability();
     if (!mounted) return;
-    setState(() {
-      _apiNeedsDeploy = enabled == null;
-      _aiEnabled = enabled == true;
+    setState(() => _availability = availability);
+  }
+
+  void _startCooldown(int seconds) {
+    _cooldownTimer?.cancel();
+    setState(() => _cooldownSeconds = seconds.clamp(1, 120));
+    _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_cooldownSeconds <= 1) {
+        setState(() => _cooldownSeconds = 0);
+        timer.cancel();
+      } else {
+        setState(() => _cooldownSeconds -= 1);
+      }
     });
   }
 
+  /// Typing is allowed while history loads; only sending waits for readiness.
+  bool get _canType => !_sending && _cooldownSeconds <= 0;
+
+  bool get _canSend => _canType && !_loadingHistory && _availability.apiReachable;
+
   @override
   void dispose() {
+    _cooldownTimer?.cancel();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -136,7 +163,30 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
 
   Future<void> _send([String? preset]) async {
     final text = (preset ?? _input.text).trim();
-    if (text.isEmpty || _sending) return;
+    if (text.isEmpty || !_canType) return;
+
+    if (_loadingHistory) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Loading chat history — try again in a moment.')),
+      );
+      return;
+    }
+
+    if (!_availability.apiReachable) {
+      await _checkAi();
+      if (!mounted) return;
+      if (!_availability.apiReachable) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Cannot reach the recipe API. In admin Settings set Mobile Recipe API URL to '
+              'https://boon-hua-fishery.onrender.com and save.',
+            ),
+          ),
+        );
+        return;
+      }
+    }
 
     setState(() {
       _sending = true;
@@ -160,9 +210,10 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
       );
 
       if (!mounted) return;
+      final replyText = result.reply;
       final assistant = _UiMessage(
         role: 'assistant',
-        text: result.reply,
+        text: replyText,
         recipes: result.recipeMaps,
       );
       setState(() => _messages.add(assistant));
@@ -174,11 +225,35 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
           recipes: result.recipeMaps,
         );
       } catch (_) {}
+    } on RecipeAiRateLimitException catch (e) {
+      if (!mounted) return;
+      _startCooldown(e.retryAfterSeconds);
+      final errText =
+          '${e.message}\n\nTry again in ${e.retryAfterSeconds} seconds.';
+      setState(() {
+        _messages.add(
+          _UiMessage(role: 'assistant', text: errText, isError: true),
+        );
+      });
+      try {
+        await _historyStore.saveMessage(
+          role: 'assistant',
+          content: errText,
+          isError: true,
+        );
+      } catch (_) {}
     } catch (e) {
       if (!mounted) return;
-      final errText =
-          'Sorry, the AI assistant could not respond. '
-          '${e.toString().replaceFirst('Exception: ', '')}';
+      final raw = e.toString().replaceFirst('Exception: ', '');
+      final errText = raw.contains('catching up') ||
+              raw.contains('rate-limited') ||
+              raw.toLowerCase().contains('too many requests')
+          ? raw
+          : 'Sorry, the assistant could not respond. $raw';
+      if (raw.toLowerCase().contains('too many requests') ||
+          raw.contains('429')) {
+        _startCooldown(60);
+      }
       setState(() {
         _messages.add(
           _UiMessage(role: 'assistant', text: errText, isError: true),
@@ -234,6 +309,16 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: 'Refresh API status',
+            onPressed: _sending
+                ? null
+                : () async {
+                    setState(() => _availability = RecipeAiAvailability.unknown);
+                    await _checkAi();
+                  },
+            icon: const Icon(Icons.refresh),
+          ),
+          IconButton(
             tooltip: 'Clear history',
             onPressed: _loadingHistory || _sending ? null : _clearHistory,
             icon: const Icon(Icons.delete_outline),
@@ -242,14 +327,14 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
       ),
       body: Column(
         children: [
-          if (_apiNeedsDeploy)
+          if (_availability.apiDown)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(12),
               color: const Color(0xFFFFEBEE),
               child: const Text(
-                'Server update required: redeploy the latest backend on Render so /recipes/ai-status exists, '
-                'then add GEMINI_API_KEY and redeploy again.',
+                'API server is not running on Render (no-server). Open the Render dashboard, confirm boon-hua-fishery is Live, '
+                'then check Root Directory is boon_hua_backend and redeploy.',
                 style: TextStyle(
                   color: Color(0xFFB71C1C),
                   fontSize: 12,
@@ -257,16 +342,29 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
                 ),
               ),
             )
-          else if (_aiEnabled == false)
+          else if (!_availability.apiReachable)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(12),
-              color: const Color(0xFFFFF3E0),
+              color: const Color(0xFFFFEBEE),
               child: const Text(
-                'AI key not set on the server. In Render → Environment, add GEMINI_API_KEY from Google AI Studio '
-                '(key usually starts with AIza), then redeploy.',
+                'Cannot reach the recipe API. Check admin Settings → Mobile Recipe API URL and that Render shows Live.',
                 style: TextStyle(
-                  color: Color(0xFF8B5000),
+                  color: Color(0xFFB71C1C),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            )
+          else if (!_availability.aiEnabled)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              color: const Color(0xFFE8F4FF),
+              child: const Text(
+                'Quick cooking tips mode — you can still ask questions. Full AI replies when Gemini is enabled on the server.',
+                style: TextStyle(
+                  color: AppColors.ink,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
@@ -332,9 +430,36 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
                 children: _starters.map((q) {
                   return ActionChip(
                     label: Text(q, style: const TextStyle(fontSize: 11)),
-                    onPressed: _sending ? null : () => _send(q),
+                    onPressed: _canSend ? () => _send(q) : null,
                   );
                 }).toList(),
+              ),
+            ),
+          if (_cooldownSeconds > 0)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF8E1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFFE082)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.timer_outlined, size: 18, color: Color(0xFFF57C00)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Please wait $_cooldownSeconds s before sending again',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                        color: Color(0xFFE65100),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           SafeArea(
@@ -349,10 +474,12 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
                       minLines: 1,
                       maxLines: 4,
                       textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      enabled: !_loadingHistory,
+                      onSubmitted: (_) => _canSend ? _send() : null,
+                      enabled: _canType,
                       decoration: InputDecoration(
-                        hintText: 'e.g. What can I cook with my prawns?',
+                        hintText: _cooldownSeconds > 0
+                            ? 'Wait $_cooldownSeconds seconds…'
+                            : 'e.g. What can I cook with my prawns?',
                         filled: true,
                         fillColor: Colors.white,
                         border: OutlineInputBorder(
@@ -368,8 +495,10 @@ class _RecipeAiChefScreenState extends State<RecipeAiChefScreen> {
                   ),
                   const SizedBox(width: 8),
                   IconButton.filled(
-                    style: IconButton.styleFrom(backgroundColor: AppColors.teal),
-                    onPressed: _sending || _loadingHistory ? null : () => _send(),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _canSend ? AppColors.teal : AppColors.muted,
+                    ),
+                    onPressed: _canSend ? () => _send() : null,
                     icon: const Icon(Icons.send_rounded, color: Colors.white),
                   ),
                 ],

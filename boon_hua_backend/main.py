@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -101,25 +101,69 @@ class RecipeChatRequest(BaseModel):
     items: List[FreezerRecipeItem] = []
     history: List[ChatMessage] = []
 
+
+class DailyRevenuePoint(BaseModel):
+    date: str = Field(..., examples=["2026-06-01"])
+    revenue: float = Field(0, ge=0)
+
+
+class SalesForecastRequest(BaseModel):
+    daily: List[DailyRevenuePoint] = Field(
+        ...,
+        description="Daily RM totals (YYYY-MM-DD), oldest to newest or any order",
+    )
+
+
 # --- API ROUTES ---
+
+def _ai_status_payload() -> dict:
+    from ai_recipe_service import ai_recipes_enabled
+
+    enabled = ai_recipes_enabled()
+    return {
+        "enabled": enabled,
+        "provider": _ai_provider_label(),
+        "statusPaths": ["/recipes/ai-status", "/recipes/aistatus"],
+    }
+
+
+@app.head("/")
+def read_root_head():
+    return Response(status_code=200)
+
 
 @app.get("/")
 def read_root():
-    from ai_recipe_service import ai_recipes_enabled
-
+    ai = _ai_status_payload()
     return {
         "status": "Online",
         "message": "Boon Hua Fishery API is running",
         "firebase": db is not None,
-        "aiRecipes": ai_recipes_enabled(),
+        "aiRecipes": ai["enabled"],
+        "ai": ai,
         "aiStatus": "/recipes/ai-status",
+        "salesForecast": "/sales/forecast",
         "docs": "/docs",
+        "health": "/health",
     }
 
 
 @app.get("/health")
 def health():
     return {"ok": True, "firebase": db is not None}
+
+
+@app.post("/sales/forecast")
+def sales_forecast(request: SalesForecastRequest):
+    """Train scikit-learn gradient boosting on daily sales; predict next 7 days."""
+    try:
+        from sales_forecast_ml import forecast_sales_ml
+
+        payload = [{"date": p.date, "revenue": p.revenue} for p in request.daily]
+        return forecast_sales_ml(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # CREATE: Add a new seafood item
 @app.post("/inventory")
@@ -179,13 +223,9 @@ def delete_item(item_id: str):
 
 
 @app.get("/recipes/ai-status")
+@app.get("/recipes/aistatus")
 def recipe_ai_status():
-    from ai_recipe_service import ai_recipes_enabled
-
-    return {
-        "enabled": ai_recipes_enabled(),
-        "provider": _ai_provider_label(),
-    }
+    return _ai_status_payload()
 
 
 def _ai_provider_label() -> str:
@@ -208,46 +248,85 @@ def suggest_recipes(request: RecipeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _rate_limited_error_message(message: str) -> bool:
+    lower = message.lower()
+    return (
+        "rate-limited" in lower
+        or "too many requests" in lower
+        or "429" in message
+        or "quota" in lower
+    )
+
+
 @app.post("/recipes/chat")
 def recipe_chat(request: RecipeChatRequest):
-    from ai_recipe_service import chat_recipes_with_ai, ai_recipes_enabled
+    from ai_recipe_service import (
+        ai_recipes_enabled,
+        chat_recipes_fallback,
+        chat_recipes_with_ai,
+    )
 
     if not ai_recipes_enabled():
-        raise HTTPException(
-            status_code=503,
-            detail="AI recipe assistant is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY on the server.",
-        )
+        return chat_recipes_fallback(request.message, request.items)
+
     try:
         history = [
             {"role": m.role, "content": m.content}
             for m in request.history
             if m.role in ("user", "assistant") and m.content.strip()
         ]
-        result = chat_recipes_with_ai(request.message, request.items, history)
-        return result
+        return chat_recipes_with_ai(request.message, request.items, history)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        detail = str(e)
+        if _rate_limited_error_message(detail):
+            return chat_recipes_fallback(request.message, request.items)
+        raise HTTPException(status_code=503, detail=detail)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _all_catalog_recipes() -> List[dict]:
+    """Full built-in recipe list for Meal Ideas (filter on the client)."""
+    from recipes_data import RECIPE_CATALOG
+
+    recipes = []
+    for recipe in RECIPE_CATALOG:
+        keywords = recipe.get("keywords") or []
+        recipes.append({
+            "id": recipe["id"],
+            "basedOn": keywords[0] if keywords else "seafood",
+            "keywords": keywords,
+            "title": recipe["title"],
+            "minutes": recipe["minutes"],
+            "difficulty": recipe["difficulty"],
+            "imageTag": recipe.get("image_tag", "fish"),
+            "imageUrl": None,
+            "source": "catalog",
+            "ingredients": recipe.get("ingredients", []),
+            "steps": recipe["steps"],
+        })
+    return recipes
+
+
 def _suggest_recipes_combined(items: List[FreezerRecipeItem]):
-    from ai_recipe_service import suggest_recipes_with_ai, ai_recipes_enabled
+    """Return the full catalog plus extra online recipes; client filters by ingredient."""
     from themealdb_service import suggest_meals_for_freezer_items
 
-    if ai_recipes_enabled():
-        ai_recipes = suggest_recipes_with_ai(items, max_recipes=6)
-        if ai_recipes:
-            return ai_recipes, "ai"
+    recipes = _all_catalog_recipes()
+    seen_ids = {r["id"] for r in recipes}
 
-    themealdb_recipes = suggest_meals_for_freezer_items(items, max_recipes=8)
-    if themealdb_recipes:
-        return themealdb_recipes, "themealdb"
+    for extra in suggest_meals_for_freezer_items(items, max_recipes=24):
+        meal_id = extra.get("id")
+        if not meal_id or meal_id in seen_ids:
+            continue
+        species = extra.get("basedOn") or ""
+        from themealdb_service import extract_ingredient_terms
 
-    local_recipes = _suggest_recipes_locally(items)
-    for recipe in local_recipes:
-        recipe["source"] = "local"
-    return local_recipes, "local"
+        extra["keywords"] = extract_ingredient_terms(species)
+        recipes.append(extra)
+        seen_ids.add(meal_id)
+
+    return recipes, "catalog"
 
 
 @app.get("/recipes/database")

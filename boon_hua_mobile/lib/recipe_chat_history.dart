@@ -16,12 +16,24 @@ class RecipeChatHistoryStore {
   }
 
   Future<List<PersistedChatMessage>> load({int limit = 80}) async {
-    final snap = await _collection
-        .orderBy('createdAt', descending: false)
-        .limit(limit)
-        .get();
+    QuerySnapshot<Map<String, dynamic>> snap;
+    try {
+      snap = await _collection
+          .orderBy('createdAt', descending: false)
+          .limit(limit)
+          .get();
+    } catch (_) {
+      snap = await _collection.limit(limit).get();
+    }
 
-    return snap.docs.map((doc) {
+    final docs = snap.docs.toList()
+      ..sort((a, b) {
+        final ta = (a.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+        final tb = (b.data()['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
+        return ta.compareTo(tb);
+      });
+
+    return docs.map((doc) {
       final data = doc.data();
       final recipesRaw = data['recipes'];
       List<Map<String, dynamic>> recipes = [];

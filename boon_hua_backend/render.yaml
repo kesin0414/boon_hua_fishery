@@ -1,7 +1,7 @@
 # Render Blueprint — deploy boon_hua_backend as a Web Service
 services:
   - type: web
-    name: boonhua-api
+    name: boon-hua-fishery
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt

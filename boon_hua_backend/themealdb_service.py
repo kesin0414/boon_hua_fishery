@@ -179,9 +179,9 @@ def suggest_meals_for_freezer_items(items: list[Any], max_recipes: int = 8) -> l
             continue
 
         for term in terms:
-            summary_meals = _search_by_ingredient(term, limit=3)
+            summary_meals = _search_by_ingredient(term, limit=5)
             if not summary_meals:
-                summary_meals = _search_by_name(term, limit=2)
+                summary_meals = _search_by_name(term, limit=3)
 
             for summary in summary_meals:
                 meal_id = summary.get("idMeal")

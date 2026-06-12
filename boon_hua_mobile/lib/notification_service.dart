@@ -4,7 +4,7 @@ import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
 import 'consumer_settings.dart';
-import 'receipt_scanner.dart';
+import 'models/freezer_item.dart';
 
 class NotificationService {
   NotificationService._();
@@ -65,6 +65,7 @@ class NotificationService {
     final now = tz.TZDateTime.now(tz.local);
 
     for (final item in items) {
+      if (!item.isActive) continue;
       final daysLeft = item.daysRemaining;
       if (daysLeft < 0 || daysLeft > threshold) continue;
 

@@ -1,7 +1,25 @@
 @import "tailwindcss";
 
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+:root {
+  --bh-navy: #1e2640;
+  --bh-blue: #4379ee;
+  --bh-teal: #5dc0ae;
+  --bh-page: #f0f2f8;
+}
+
+html {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 .bh-login-bg {
-  background: linear-gradient(135deg, #e8f4ff 0%, #f5f6fa 45%, #e0fff8 100%);
+  background: linear-gradient(145deg, #e8f4ff 0%, #f0f2f8 40%, #e8faf5 100%);
 }
 
 .bh-float {
@@ -14,6 +32,47 @@
 
 .bh-card-enter {
   animation: bh-card-enter 0.5s ease-out;
+}
+
+.bh-table thead th {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.bh-table tbody tr:hover {
+  background-color: #f8fafc;
+}
+
+/* Wide tables (sales ledger) — scroll inside the card, not off the page */
+.bh-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+}
+
+.bh-sales-ledger-table {
+  min-width: 920px;
+}
+
+.bh-table tbody tr:hover .bh-sticky-actions {
+  background-color: #f8fafc;
+}
+
+.bh-sticky-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background-color: #fff;
+  box-shadow: -6px 0 10px rgba(15, 23, 42, 0.06);
+}
+
+.bh-sticky-actions-header {
+  position: sticky;
+  right: 0;
+  z-index: 3;
+  background-color: #f5f6fa;
+  box-shadow: -6px 0 10px rgba(15, 23, 42, 0.06);
 }
 
 @keyframes bh-float {
@@ -37,10 +96,30 @@
   }
 }
 
+#dashboard-overview {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bh-revenue-chart {
+  position: relative;
+  max-width: 100%;
+  min-height: 300px;
+}
+
+.bh-revenue-chart .recharts-responsive-container {
+  width: 100% !important;
+  min-height: 300px;
+}
+
+.bh-revenue-chart .recharts-wrapper {
+  max-width: 100% !important;
+}
+
 @media print {
   @page {
-    margin: 12mm;
-    size: auto;
+    margin: 14mm;
+    size: A4;
   }
 
   html,
@@ -48,6 +127,7 @@
   #root {
     height: auto !important;
     overflow: visible !important;
+    background: white !important;
   }
 
   body {
@@ -55,13 +135,72 @@
     -webkit-print-color-adjust: exact;
   }
 
-  #dashboard-overview .recharts-responsive-container {
-    height: 220px !important;
-    min-height: 220px !important;
+  body.bh-print-report aside,
+  body.bh-print-report header,
+  body.bh-print-report .no-print {
+    display: none !important;
   }
 
-  #dashboard-overview .recharts-wrapper,
-  #dashboard-overview svg {
+  body.bh-print-report .flex.h-screen {
+    display: block !important;
+    height: auto !important;
     overflow: visible !important;
+    background: white !important;
+  }
+
+  body.bh-print-report main {
+    padding: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  body.bh-print-report .bh-report-document {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  body.bh-print-report #monthly-sales-report .rounded-2xl {
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.bh-print-report #monthly-sales-report table {
+    font-size: 10px !important;
+  }
+
+  body.bh-print-report #monthly-sales-report thead {
+    display: table-header-group;
+  }
+
+  body.bh-print-report #monthly-sales-report tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.bh-print-report #dashboard-overview .recharts-responsive-container {
+    height: 200px !important;
+    min-height: 200px !important;
+    max-width: 100% !important;
+  }
+
+  body.bh-print-report #dashboard-overview .recharts-wrapper,
+  body.bh-print-report #dashboard-overview svg {
+    overflow: visible !important;
+  }
+
+  body.bh-print-report #dashboard-overview > div {
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  body.bh-print-report .bh-revenue-chart {
+    height: 200px !important;
+    overflow: hidden !important;
   }
 }

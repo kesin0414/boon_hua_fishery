@@ -1,14 +1,6 @@
 import 'package:flutter/material.dart';
 
-class AppColors {
-  static const navy = Color(0xFF2F3C95);
-  static const teal = Color(0xFF5DC0AE);
-  static const page = Color(0xFFF7F8FA);
-  static const ink = Color(0xFF061653);
-  static const muted = Color(0xFF6E7890);
-  static const line = Color(0xFFE3E8EF);
-  static const danger = Color(0xFFE44848);
-}
+import 'theme/app_colors.dart';
 
 class ScreenScaffold extends StatelessWidget {
   const ScreenScaffold({super.key, required this.child});

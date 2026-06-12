@@ -1,0 +1,16 @@
+# Render Blueprint — must live at REPOSITORY ROOT (boon_hua_fishery/)
+# If your service was created manually, set Root Directory to boon_hua_backend OR
+# change Start Command to: uvicorn main:app --host 0.0.0.0 --port $PORT (from repo root)
+
+services:
+  - type: web
+    name: boon-hua-fishery
+    runtime: python
+    plan: free
+    rootDir: boon_hua_backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"

@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 
 import 'app_contact.dart';
 import 'app_widgets.dart';
+import 'theme/app_colors.dart';
+import 'store_settings.dart';
 import 'consumer_settings.dart';
+import 'models/freezer_item.dart';
 import 'notification_service.dart';
-import 'receipt_scanner.dart';
 
 /// Settings hub — tap a card to open that section only.
 class SettingsScreen extends StatelessWidget {
@@ -110,8 +112,8 @@ class SettingsScreen extends StatelessWidget {
 class ContactUsPage extends StatelessWidget {
   const ContactUsPage({super.key});
 
-  Future<void> _openWhatsApp(BuildContext context) async {
-    final opened = await AppContact.openAdminWhatsApp();
+  Future<void> _openWhatsApp(BuildContext context, String storePhone) async {
+    final opened = await AppContact.openAdminWhatsApp(storePhone: storePhone);
     if (!context.mounted) return;
     if (!opened) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -124,6 +126,46 @@ class ContactUsPage extends StatelessWidget {
     }
   }
 
+  Widget _detailRow(IconData icon, String label, String value) {
+    if (value.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: AppColors.teal),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -133,80 +175,102 @@ class ContactUsPage extends StatelessWidget {
         foregroundColor: Colors.white,
         title: const Text('Contact Us'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.all(18),
-        children: [
-          AppCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 56,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF25D366).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: const Icon(
-                    Icons.chat_rounded,
-                    color: Color(0xFF25D366),
-                    size: 30,
-                  ),
+      body: StreamBuilder<StoreSettings>(
+        stream: StoreSettings.watchMain(),
+        builder: (context, snapshot) {
+          final store = snapshot.data ?? const StoreSettings();
+          final phone = store.phone.isNotEmpty
+              ? store.phone
+              : AppContact.fallbackWhatsAppDisplay;
+          final phoneForWa = store.phone.isNotEmpty
+              ? store.phone
+              : AppContact.fallbackWhatsAppDigits;
+
+          return ListView(
+            padding: const EdgeInsets.all(18),
+            children: [
+              AppCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      store.storeName,
+                      style: const TextStyle(
+                        color: AppColors.ink,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Store details from admin settings — updates automatically.',
+                      style: TextStyle(color: AppColors.muted, height: 1.45),
+                    ),
+                    const SizedBox(height: 16),
+                    _detailRow(Icons.location_on_outlined, 'ADDRESS', store.address),
+                    _detailRow(Icons.schedule, 'HOURS', store.hoursLabel),
+                    _detailRow(Icons.phone_outlined, 'PHONE / WHATSAPP', phone),
+                    _detailRow(Icons.email_outlined, 'EMAIL', store.email),
+                    if (store.contactNote.isNotEmpty)
+                      _detailRow(Icons.info_outline, 'NOTE', store.contactNote),
+                  ],
                 ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Need help?',
-                  style: TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w900,
-                  ),
+              ),
+              const SizedBox(height: 16),
+              AppCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF25D366).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(
+                        Icons.chat_rounded,
+                        color: Color(0xFF25D366),
+                        size: 30,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Chat with us',
+                      style: TextStyle(
+                        color: AppColors.ink,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'WhatsApp the store for account help, orders, or support.',
+                      style: TextStyle(color: AppColors.muted, height: 1.45),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Message our team on WhatsApp for account help, orders, or app support.',
-                  style: TextStyle(color: AppColors.muted, height: 1.45),
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF25D366),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.fromHeight(52),
                 ),
-                const SizedBox(height: 16),
-                const Text(
-                  'ADMIN WHATSAPP',
-                  style: TextStyle(
-                    color: AppColors.muted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  AppContact.adminWhatsAppDisplay,
-                  style: const TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          FilledButton.icon(
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF25D366),
-              foregroundColor: Colors.white,
-              minimumSize: const Size.fromHeight(52),
-            ),
-            onPressed: () => _openWhatsApp(context),
-            icon: const Icon(Icons.open_in_new),
-            label: const Text('Open WhatsApp'),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: () => _openWhatsApp(context),
-            icon: const Icon(Icons.message_outlined),
-            label: const Text('Send default message'),
-          ),
-        ],
+                onPressed: () => _openWhatsApp(context, phoneForWa),
+                icon: const Icon(Icons.open_in_new),
+                label: const Text('Open WhatsApp'),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () => _openWhatsApp(context, phoneForWa),
+                icon: const Icon(Icons.message_outlined),
+                label: const Text('Send default message'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

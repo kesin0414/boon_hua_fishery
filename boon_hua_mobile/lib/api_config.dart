@@ -53,7 +53,7 @@ class ApiConfig {
       return 'http://127.0.0.1:8000';
     }
 
-    return 'https://boonhua-api.onrender.com';
+    return 'https://boon-hua-fishery.onrender.com';
   }
 
   static Future<String?> _loadCachedRemote() async {

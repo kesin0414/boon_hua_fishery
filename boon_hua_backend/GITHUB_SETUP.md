@@ -88,9 +88,11 @@ git push -u origin main
 3. **Build:** `pip install -r requirements.txt`
 4. **Start:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
 5. **Health check:** `/`
-6. Env var **`FIREBASE_CREDENTIALS_JSON`** = contents of `firebase_credentials.json` (optional for Meal Ideas)
+6. **Environment** (Render → boon-hua-fishery):
+   - **`GEMINI_API_KEY`** — AI meal ideas & chat (see DEPLOY_RENDER.md)
+   - **`FIREBASE_CREDENTIALS_JSON`** — optional; enables `firebase: true` and `/inventory` API routes
 
-After deploy, test: `https://boonhua-api.onrender.com/`
+After deploy, test: `https://boon-hua-fishery.onrender.com/` → expect `"aiRecipes": true` and optionally `"firebase": true`.
 
 ## Step 5 — Admin web (optional hosting)
 
