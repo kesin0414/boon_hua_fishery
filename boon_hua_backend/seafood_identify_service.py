@@ -78,12 +78,17 @@ def _models_to_try() -> list[str]:
     ordered: list[str] = []
     for name in (
         GEMINI_MODEL,
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
         *GEMINI_MODEL_FALLBACKS,
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-flash-latest",
     ):
         n = (name or "").strip()
+        # Skip retired IDs that now 404 on v1beta.
+        if n.startswith("gemini-1.5"):
+            continue
         if n and n not in ordered:
             ordered.append(n)
     return ordered
