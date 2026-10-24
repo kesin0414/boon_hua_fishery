@@ -11,11 +11,13 @@ import urllib.parse
 import urllib.request
 from typing import Any, List, Optional
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 GEMINI_MODEL_FALLBACKS = (
-    "gemini-2.0-flash-lite",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
 )
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 

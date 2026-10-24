@@ -74,7 +74,7 @@ def _identify_system_prompt() -> str:
     )
 
 
-def _models_to_try() -> list[str]:
+def _models_to_try(api_key: str | None = None) -> list[str]:
     ordered: list[str] = []
     for name in (
         GEMINI_MODEL,
@@ -91,7 +91,51 @@ def _models_to_try() -> list[str]:
             continue
         if n and n not in ordered:
             ordered.append(n)
+    # Discover whatever Flash models this API key can actually call.
+    if api_key:
+        for name in _discover_gemini_flash_models(api_key):
+            if name not in ordered:
+                ordered.append(name)
     return ordered
+
+
+def _discover_gemini_flash_models(api_key: str) -> list[str]:
+    """Ask Google which generateContent models this key can use."""
+    url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
+    request = urllib.request.Request(
+        url,
+        headers={"x-goog-api-key": api_key},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"WARN: could not list Gemini models: {exc}")
+        return []
+
+    found: list[str] = []
+    for item in data.get("models") or []:
+        full = str(item.get("name") or "")
+        short = full.split("/")[-1].strip()
+        methods = item.get("supportedGenerationMethods") or []
+        if not short or "generateContent" not in methods:
+            continue
+        lower = short.lower()
+        if "flash" not in lower and "pro" not in lower:
+            continue
+        if short.startswith("gemini-1.5"):
+            continue
+        found.append(short)
+
+    # Prefer flash / lite first for speed + free-tier friendliness.
+    found.sort(
+        key=lambda n: (
+            0 if "flash-lite" in n else 1 if "flash" in n else 2,
+            n,
+        )
+    )
+    return found[:8]
 
 
 def identify_seafood_from_image(
@@ -348,7 +392,7 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
     }
 
     last_error: RuntimeError | None = None
-    for model in _models_to_try():
+    for model in _models_to_try(api_key):
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model}:generateContent"
