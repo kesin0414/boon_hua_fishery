@@ -75,27 +75,29 @@ def _identify_system_prompt() -> str:
 
 
 def _models_to_try(api_key: str | None = None) -> list[str]:
-    ordered: list[str] = []
-    for name in (
+    """Return a short list of Gemini models to try (max 3) for photo ID."""
+    discovered: list[str] = []
+    if api_key:
+        discovered = _discover_gemini_flash_models(api_key)
+
+    preferred = [
         GEMINI_MODEL,
         *GEMINI_MODEL_FALLBACKS,
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
-        "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
         "gemini-flash-latest",
-    ):
+    ]
+    ordered: list[str] = []
+    for name in [*discovered, *preferred]:
         n = (name or "").strip()
-        # Skip retired IDs that now 404 on v1beta.
-        if n.startswith("gemini-1.5"):
+        if not n or n.startswith("gemini-1.5"):
             continue
-        if n and n not in ordered:
+        if n not in ordered:
             ordered.append(n)
-    # Discover whatever Flash models this API key can actually call.
-    if api_key:
-        for name in _discover_gemini_flash_models(api_key):
-            if name not in ordered:
-                ordered.append(name)
+        if len(ordered) >= 3:
+            break
     return ordered
 
 
@@ -403,7 +405,7 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
                 url, data=payload, headers=headers, method="POST"
             )
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                with urllib.request.urlopen(request, timeout=40) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 candidates = data.get("candidates") or []
                 if not candidates:
@@ -428,6 +430,21 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
                     raise RuntimeError("Gemini returned empty content")
                 text = parts[0].get("text") or ""
                 return _normalize_identify_result(text)
+            except TimeoutError as exc:
+                last_error = RuntimeError(
+                    "Gemini timed out while reading the photo. Try a smaller cropped photo."
+                )
+                print(f"WARN: Gemini timeout on {model}: {exc}")
+                break
+            except urllib.error.URLError as exc:
+                reason = str(getattr(exc, "reason", exc))
+                if "timed out" in reason.lower():
+                    last_error = RuntimeError(
+                        "Gemini timed out while reading the photo. Try a smaller cropped photo."
+                    )
+                    print(f"WARN: Gemini URL timeout on {model}: {exc}")
+                    break
+                raise RuntimeError(f"Gemini network error: {exc}") from exc
             except urllib.error.HTTPError as exc:
                 last_http = exc
                 if exc.code == 429 and attempt < 2:
@@ -442,6 +459,9 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
             continue
         if last_http is not None:
             raise RuntimeError(_gemini_error_message(last_http))
+        # Timeout on this model — try the next one once.
+        if last_error is not None and "timed out" in str(last_error).lower():
+            continue
 
     if last_error is not None:
         raise last_error
