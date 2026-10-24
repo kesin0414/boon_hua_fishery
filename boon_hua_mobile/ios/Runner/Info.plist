@@ -9,9 +9,11 @@
 		<key>CFBundleDisplayName</key>
 		<string>Boon Hua Mobile</string>
 		<key>NSCameraUsageDescription</key>
-		<string>This app uses the camera to scan seafood purchase receipts.</string>
+		<string>This app uses the camera to scan seafood receipts and photograph seafood for identification.</string>
 		<key>NSPhotoLibraryUsageDescription</key>
-		<string>This app needs photo library access so you can choose a seafood item image.</string>
+		<string>This app needs photo library access so you can choose a seafood photo to crop and identify.</string>
+		<key>NSPhotoLibraryAddUsageDescription</key>
+		<string>This app may save cropped seafood photos on your device.</string>
 		<key>UIBackgroundModes</key>
 		<array>
 			<string>fetch</string>

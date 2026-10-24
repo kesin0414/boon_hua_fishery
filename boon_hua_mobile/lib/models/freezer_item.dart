@@ -7,6 +7,7 @@ class FreezerItem {
     required this.bestBeforeDate,
     required this.pricePerKg,
     this.iconKey = 'fish',
+    this.category = '',
     this.imagePath,
     this.displayWeightUnit = 'g',
     this.linkedPriceHistoryId,
@@ -21,6 +22,7 @@ class FreezerItem {
   DateTime bestBeforeDate;
   final double pricePerKg;
   final String iconKey;
+  final String category;
   final String? imagePath;
   /// Unit shown when entering weight (g, kg, lb). Stock is always stored as kg.
   final String displayWeightUnit;
@@ -43,6 +45,7 @@ class FreezerItem {
     DateTime? bestBeforeDate,
     double? pricePerKg,
     String? iconKey,
+    String? category,
     String? imagePath,
     String? displayWeightUnit,
     String? linkedPriceHistoryId,
@@ -57,6 +60,7 @@ class FreezerItem {
       bestBeforeDate: bestBeforeDate ?? this.bestBeforeDate,
       pricePerKg: pricePerKg ?? this.pricePerKg,
       iconKey: iconKey ?? this.iconKey,
+      category: category ?? this.category,
       imagePath: imagePath ?? this.imagePath,
       displayWeightUnit: displayWeightUnit ?? this.displayWeightUnit,
       linkedPriceHistoryId: linkedPriceHistoryId ?? this.linkedPriceHistoryId,

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/freezer_item.dart';
+import '../models/market_inventory_item.dart';
 import '../models/price_history_entry.dart';
 import '../weight_units.dart';
 
@@ -47,6 +48,17 @@ class FirebaseRepository {
         .map(
           (snapshot) => snapshot.docs.map((doc) => _freezerHistoryFromDoc(doc)).toList(),
         );
+  }
+
+  /// Live admin list prices from web Inventory (`inventory` collection, field `price`).
+  Stream<List<MarketInventoryItem>> watchMarketInventory() {
+    return _db.collection('inventory').snapshots().map((snapshot) {
+      final items = snapshot.docs.map(_marketInventoryFromDoc).toList()
+        ..sort(
+          (a, b) => a.species.toLowerCase().compareTo(b.species.toLowerCase()),
+        );
+      return items;
+    });
   }
 
   Future<String> addFreezerItem(FreezerItem item) async {
@@ -150,6 +162,22 @@ class FirebaseRepository {
     await batch.commit();
   }
 
+  MarketInventoryItem _marketInventoryFromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    return MarketInventoryItem(
+      id: doc.id,
+      species: data['species'] as String? ?? '',
+      pricePerKg: (data['price'] as num?)?.toDouble() ??
+          (data['pricePerKg'] as num?)?.toDouble() ??
+          0,
+      weightKg: (data['weight'] as num?)?.toDouble() ?? 0,
+      status: data['status'] as String? ?? '',
+      category: data['category'] as String? ?? '',
+    );
+  }
+
   FreezerItem _freezerFromDoc(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
     final data = doc.data();
     return FreezerItem(
@@ -160,6 +188,7 @@ class FirebaseRepository {
       bestBeforeDate: _dateFromValue(data['bestBeforeDate']),
       pricePerKg: (data['pricePerKg'] as num?)?.toDouble() ?? 0,
       iconKey: data['iconKey'] as String? ?? 'fish',
+      category: data['category'] as String? ?? '',
       imagePath: data['imageFileName'] as String?,
       displayWeightUnit: data['displayWeightUnit'] as String? ?? 'g',
       linkedPriceHistoryId: data['linkedPriceHistoryId'] as String?,
@@ -267,6 +296,7 @@ class FirebaseRepository {
       'bestBeforeDate': Timestamp.fromDate(item.bestBeforeDate),
       'pricePerKg': item.pricePerKg,
       'iconKey': item.iconKey,
+      if (item.category.isNotEmpty) 'category': item.category,
       'displayWeightUnit': item.displayWeightUnit,
       'status': item.status.isEmpty ? 'active' : item.status,
       if (item.statusChangedAt != null)

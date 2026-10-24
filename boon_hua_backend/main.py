@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 import json
 import os
 
@@ -114,6 +114,11 @@ class SalesForecastRequest(BaseModel):
     )
 
 
+class SeafoodIdentifyRequest(BaseModel):
+    imageBase64: str = Field(..., min_length=50, description="JPEG/PNG/WebP as base64")
+    mimeType: str = Field(default="image/jpeg", examples=["image/jpeg"])
+
+
 # --- API ROUTES ---
 
 def _ai_status_payload() -> dict:
@@ -143,6 +148,7 @@ def read_root():
         "ai": ai,
         "aiStatus": "/recipes/ai-status",
         "salesForecast": "/sales/forecast",
+        "seafoodIdentify": "/seafood/identify",
         "docs": "/docs",
         "health": "/health",
     }
@@ -254,6 +260,28 @@ def _rate_limited_error_message(message: str) -> bool:
         or "429" in message
         or "quota" in lower
     )
+
+
+@app.post("/seafood/identify")
+def seafood_identify(request: SeafoodIdentifyRequest):
+    """Preview: identify seafood from a photo and suggest dish ideas (not 100% accurate)."""
+    try:
+        from seafood_identify_service import identify_seafood_from_image
+
+        return identify_seafood_from_image(
+            image_base64=request.imageBase64,
+            mime_type=request.mimeType,
+        )
+    except RuntimeError as e:
+        detail = str(e)
+        if _rate_limited_error_message(detail):
+            raise HTTPException(
+                status_code=429,
+                detail="AI is busy right now. Please try again in a minute.",
+            )
+        raise HTTPException(status_code=503, detail=detail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/recipes/chat")
@@ -436,3 +464,35 @@ def _suggest_recipes_locally(items: List[FreezerRecipeItem]):
             "Serve hot with rice or vegetables.",
         ],
     }]
+
+
+class SalesReportExportRequest(BaseModel):
+    format: Literal["pdf", "xlsx", "csv"]
+    payload: dict
+
+
+@app.post("/reports/sales/export")
+def export_sales_report(body: SalesReportExportRequest):
+    """Render monthly sales report via JasperReports (CSV, Excel, PDF)."""
+    from jasper_report_service import (
+        JasperReportsNotConfiguredError,
+        render_sales_report,
+    )
+
+    try:
+        content, mime_type, filename = render_sales_report(body.payload, body.format)
+    except JasperReportsNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"JasperReports export failed: {exc}",
+        ) from exc
+
+    return Response(
+        content=content,
+        media_type=mime_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

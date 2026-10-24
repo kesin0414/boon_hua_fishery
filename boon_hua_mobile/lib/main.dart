@@ -15,12 +15,15 @@ import 'consumer_settings.dart';
 import 'data/firebase_repository.dart';
 import 'firebase_options.dart';
 import 'models/freezer_item.dart';
+import 'models/market_inventory_item.dart';
 import 'models/price_history_entry.dart';
 import 'notification_service.dart';
 import 'receipt_scanner.dart';
+import 'data/seafood_catalog.dart';
 import 'app_branding.dart';
 import 'recipe_ai_chef_screen.dart';
 import 'recipe_ai_service.dart';
+import 'seafood_identify_screen.dart';
 import 'services/price_sync_service.dart';
 import 'services/recipe_suggestion_service.dart';
 import 'settings_screen.dart';
@@ -92,11 +95,155 @@ class _MobileAuthGateState extends State<MobileAuthGate> {
           return const AuthScreen();
         }
 
-        return ConsumerShell(
+        return ConsumerAccountGate(
           user: user,
           onLogout: () => FirebaseAuth.instance.signOut(),
         );
       },
+    );
+  }
+}
+
+/// Enforces platform routing: consumers on mobile; blocks suspended accounts.
+class ConsumerAccountGate extends StatelessWidget {
+  const ConsumerAccountGate({
+    super.key,
+    required this.user,
+    required this.onLogout,
+  });
+
+  final User user;
+  final VoidCallback onLogout;
+
+  Future<_AccountAccess> _loadAccess() async {
+    final adminSnap = await FirebaseFirestore.instance
+        .collection('adminProfiles')
+        .doc(user.uid)
+        .get();
+    final customerSnap = await FirebaseFirestore.instance
+        .collection('customers')
+        .doc(user.uid)
+        .get();
+
+    if (adminSnap.exists && !customerSnap.exists) {
+      return _AccountAccess.adminOnly;
+    }
+
+    final status = customerSnap.data()?['status'] as String? ?? 'Active';
+    if (status == 'Suspended') {
+      return _AccountAccess.suspended;
+    }
+
+    return _AccountAccess.allowed;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<_AccountAccess>(
+      future: _loadAccess(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            backgroundColor: AppColors.navyDark,
+            body: Center(
+              child: CircularProgressIndicator(color: AppColors.teal),
+            ),
+          );
+        }
+
+        final access = snapshot.data ?? _AccountAccess.allowed;
+        if (access == _AccountAccess.adminOnly) {
+          return _PlatformRedirectScreen(
+            title: 'Administrator account',
+            message:
+                'This account is registered for the web management dashboard. '
+                'Please sign in at the Boon Hua admin portal in your browser.',
+            onLogout: onLogout,
+          );
+        }
+        if (access == _AccountAccess.suspended) {
+          return _PlatformRedirectScreen(
+            title: 'Account suspended',
+            message:
+                'Your consumer account has been deactivated by the administrator. '
+                'Contact Boon Hua Fishery if you need access restored.',
+            onLogout: onLogout,
+          );
+        }
+
+        return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: FirebaseFirestore.instance
+              .collection('customers')
+              .doc(user.uid)
+              .snapshots(),
+          builder: (context, customerSnap) {
+            final status = customerSnap.data?.data()?['status'] as String?;
+            if (status == 'Suspended') {
+              WidgetsBinding.instance.addPostFrameCallback((_) => onLogout());
+              return _PlatformRedirectScreen(
+                title: 'Account suspended',
+                message:
+                    'Your account was deactivated. Contact Boon Hua Fishery for assistance.',
+                onLogout: onLogout,
+              );
+            }
+            return ConsumerShell(user: user, onLogout: onLogout);
+          },
+        );
+      },
+    );
+  }
+}
+
+enum _AccountAccess { allowed, suspended, adminOnly }
+
+class _PlatformRedirectScreen extends StatelessWidget {
+  const _PlatformRedirectScreen({
+    required this.title,
+    required this.message,
+    required this.onLogout,
+  });
+
+  final String title;
+  final String message;
+  final VoidCallback onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.page,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock_outline, size: 56, color: AppColors.navy),
+              const SizedBox(height: 16),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  color: AppColors.ink,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.muted, height: 1.45),
+              ),
+              const SizedBox(height: 24),
+              FilledButton(
+                onPressed: onLogout,
+                child: const Text('Back to sign in'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -190,10 +337,35 @@ class _AuthScreenState extends State<AuthScreen> {
               'updatedAt': FieldValue.serverTimestamp(),
             }, SetOptions(merge: true));
       } else {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(
+        final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
           email: email,
           password: password,
         );
+        final uid = credential.user!.uid;
+        final adminSnap = await FirebaseFirestore.instance
+            .collection('adminProfiles')
+            .doc(uid)
+            .get();
+        final customerSnap = await FirebaseFirestore.instance
+            .collection('customers')
+            .doc(uid)
+            .get();
+        if (adminSnap.exists && !customerSnap.exists) {
+          await FirebaseAuth.instance.signOut();
+          setState(
+            () => _error =
+                'Administrator accounts must use the web dashboard. Open the Boon Hua admin portal in your browser.',
+          );
+          return;
+        }
+        if (customerSnap.exists && customerSnap.data()?['status'] == 'Suspended') {
+          await FirebaseAuth.instance.signOut();
+          setState(
+            () => _error =
+                'Your account is suspended. Contact Boon Hua Fishery to restore access.',
+          );
+          return;
+        }
       }
     } on FirebaseAuthException catch (error) {
       setState(() => _error = error.message ?? 'Authentication failed.');
@@ -361,9 +533,13 @@ class _ConsumerShellState extends State<ConsumerShell> {
   StreamSubscription<List<FreezerItem>>? _freezerSubscription;
   StreamSubscription<List<PriceHistoryEntry>>? _historySubscription;
   StreamSubscription<List<FreezerHistoryEntry>>? _freezerHistorySubscription;
+  StreamSubscription<List<MarketInventoryItem>>? _marketInventorySubscription;
+  bool _marketInventoryReady = false;
+  String? _marketInventoryError;
   List<FreezerItem> _freezerItems = [];
   List<PriceHistoryEntry> _priceHistory = [];
   List<FreezerHistoryEntry> _freezerHistory = [];
+  List<MarketInventoryItem> _marketInventory = [];
 
   List<FreezerItem> get _activeFreezerItems =>
       _freezerItems.where((item) => item.isActive).toList();
@@ -388,6 +564,26 @@ class _ConsumerShellState extends State<ConsumerShell> {
     _freezerHistorySubscription = _repository.watchFreezerHistory().listen(
       (entries) {
         if (mounted) setState(() => _freezerHistory = entries);
+      },
+    );
+    _marketInventorySubscription = _repository.watchMarketInventory().listen(
+      (items) {
+        if (!mounted) return;
+        setState(() {
+          _marketInventory = items;
+          _marketInventoryReady = true;
+          _marketInventoryError = null;
+        });
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!mounted) return;
+        setState(() {
+          _marketInventoryReady = true;
+          _marketInventoryError = error is FirebaseException &&
+                  error.code == 'permission-denied'
+              ? 'Market prices are not available. Sign in and try again, or contact support if this persists.'
+              : 'Could not load market prices. Check your connection and try again.';
+        });
       },
     );
     _loadSettingsAndNotifications();
@@ -421,19 +617,107 @@ class _ConsumerShellState extends State<ConsumerShell> {
     _freezerSubscription?.cancel();
     _historySubscription?.cancel();
     _freezerHistorySubscription?.cancel();
+    _marketInventorySubscription?.cancel();
     _scanner.dispose();
     super.dispose();
   }
 
   Future<void> _scanReceipt() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: AppColors.scanSheetBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.25),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.document_scanner_outlined,
+                      color: AppColors.teal,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Scan receipt',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 17,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Use your camera to capture a receipt for OCR.',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.75),
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.teal,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: () => Navigator.pop(ctx, ImageSource.camera),
+                icon: const Icon(Icons.photo_camera_outlined),
+                label: const Text('Take photo'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  side: BorderSide(color: Colors.white.withValues(alpha: 0.45)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: () => Navigator.pop(ctx, ImageSource.gallery),
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('Choose from gallery'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+
     setState(() => _isScanning = true);
     try {
-      final result = await _scanner.scanReceipt();
+      final result = await _scanner.scanReceipt(source: source);
       if (!mounted) return;
 
       if (result.cancelled) return;
 
-      if (!result.isSuccess) {
+      final receipt = result.receipt;
+      if (receipt == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -447,8 +731,20 @@ class _ConsumerShellState extends State<ConsumerShell> {
         return;
       }
 
-      final receipt = result.receipt!;
-      final confirmed = await showModalBottomSheet<bool>(
+      if (!result.isSuccess) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result.errorMessage ??
+                  'Could not read all lines. Review and edit the detected text.',
+            ),
+            backgroundColor: const Color(0xFFE65100),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+
+      final reviewed = await showModalBottomSheet<ParsedReceipt?>(
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.white,
@@ -458,13 +754,13 @@ class _ConsumerShellState extends State<ConsumerShell> {
         builder: (context) => ReceiptReviewSheet(receipt: receipt),
       );
 
-      if (confirmed == true) {
-        await _applyReceipt(receipt);
+      if (reviewed != null) {
+        await _applyReceipt(reviewed);
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Added ${receipt.items.length} item(s). Expiry set to ${FreezerService.defaultShelfLifeDays} days.',
+              'Added ${reviewed.items.length} item(s). Expiry set to ${FreezerService.defaultShelfLifeDays} days.',
             ),
           ),
         );
@@ -606,10 +902,6 @@ class _ConsumerShellState extends State<ConsumerShell> {
         linkedPriceHistoryId: entry.id,
       ),
     );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Price history and freezer item updated.')),
-    );
   }
 
   Future<void> _deleteFreezerItem(FreezerItem item) async {
@@ -636,8 +928,16 @@ class _ConsumerShellState extends State<ConsumerShell> {
     );
   }
 
+  void _openMarket() {
+    setState(() => _selectedIndex = 3);
+  }
+
+  void _goHome() {
+    setState(() => _selectedIndex = 0);
+  }
+
   void _openSettings() {
-    setState(() => _selectedIndex = 5);
+    setState(() => _selectedIndex = 6);
   }
 
   @override
@@ -647,12 +947,20 @@ class _ConsumerShellState extends State<ConsumerShell> {
         freezerItems: _activeFreezerItems,
         onViewFreezer: () => setState(() => _selectedIndex = 1),
         onScan: _scanReceipt,
-        onRecipes: () => setState(() => _selectedIndex = 4),
+        onRecipes: () => setState(() => _selectedIndex = 5),
+        onIdentifySeafood: () {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => const SeafoodIdentifyScreen(),
+            ),
+          );
+        },
       ),
       FreezerScreen(
         items: _activeFreezerItems,
         lossHistory: _freezerHistory,
         priceHistory: _priceHistory,
+        marketInventory: _marketInventory,
         onAddItem: _addManualFreezerItem,
         onUpdateItem: _updateFreezerItem,
         onDeleteItem: _deleteFreezerItem,
@@ -662,6 +970,12 @@ class _ConsumerShellState extends State<ConsumerShell> {
         isScanning: _isScanning,
         latestReceipt: _latestReceipt,
         onScan: _scanReceipt,
+      ),
+      MarketPricesScreen(
+        inventory: _marketInventory,
+        isLoading: !_marketInventoryReady,
+        errorMessage: _marketInventoryError,
+        onBackToHome: _goHome,
       ),
       CompareScreen(
         history: _priceHistory,
@@ -688,6 +1002,7 @@ class _ConsumerShellState extends State<ConsumerShell> {
           AppHeader(
             user: widget.user,
             profileName: _settings.resolvedName,
+            onMarket: _openMarket,
             onSettings: _openSettings,
           ),
           Expanded(child: pages[_selectedIndex]),
@@ -699,8 +1014,8 @@ class _ConsumerShellState extends State<ConsumerShell> {
           final pageIndex = switch (index) {
             0 => 0,
             1 => 1,
-            2 => 3,
-            3 => 4,
+            2 => 4,
+            3 => 5,
             _ => 0,
           };
           setState(() => _selectedIndex = pageIndex);
@@ -729,8 +1044,8 @@ class _ConsumerShellState extends State<ConsumerShell> {
 
   int get _bottomNavIndex {
     if (_selectedIndex == 0 || _selectedIndex == 1) return _selectedIndex;
-    if (_selectedIndex == 3) return 2;
-    if (_selectedIndex == 4) return 3;
+    if (_selectedIndex == 4) return 2;
+    if (_selectedIndex == 5) return 3;
     return -1;
   }
 }
@@ -739,11 +1054,13 @@ class AppHeader extends StatelessWidget {
   const AppHeader({
     super.key,
     required this.user,
+    required this.onMarket,
     required this.onSettings,
     this.profileName,
   });
 
   final User user;
+  final VoidCallback onMarket;
   final VoidCallback onSettings;
   final String? profileName;
 
@@ -832,10 +1149,59 @@ class AppHeader extends StatelessWidget {
               ],
             ),
           ),
-          IconButton.filled(
-            style: IconButton.styleFrom(backgroundColor: Color(0xFF3445A7)),
-            onPressed: onSettings,
-            icon: const Icon(Icons.settings_outlined, color: Colors.white),
+          Flexible(
+            child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Material(
+                color: AppColors.teal,
+                borderRadius: BorderRadius.circular(10),
+                elevation: 2,
+                shadowColor: Colors.black26,
+                child: InkWell(
+                  onTap: onMarket,
+                  borderRadius: BorderRadius.circular(10),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 5,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(
+                          Icons.payments_outlined,
+                          color: Colors.white,
+                          size: 15,
+                        ),
+                        SizedBox(width: 4),
+                        Text(
+                          'Market price',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 10,
+                            height: 1.1,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton.filled(
+                style: IconButton.styleFrom(
+                  backgroundColor: const Color(0xFF3445A7),
+                  minimumSize: const Size(40, 40),
+                  padding: EdgeInsets.zero,
+                ),
+                onPressed: onSettings,
+                tooltip: 'Settings',
+                icon: const Icon(Icons.settings_outlined, color: Colors.white, size: 20),
+              ),
+            ],
+            ),
           ),
         ],
           ),
@@ -852,12 +1218,14 @@ class HomeScreen extends StatelessWidget {
     required this.onViewFreezer,
     required this.onScan,
     required this.onRecipes,
+    this.onIdentifySeafood,
   });
 
   final List<FreezerItem> freezerItems;
   final VoidCallback onViewFreezer;
   final VoidCallback onScan;
   final VoidCallback onRecipes;
+  final VoidCallback? onIdentifySeafood;
 
   @override
   Widget build(BuildContext context) {
@@ -919,6 +1287,19 @@ class HomeScreen extends StatelessWidget {
               ),
             ],
           ),
+          if (onIdentifySeafood != null) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: QuickActionCard(
+                label: 'Identify seafood (preview)',
+                icon: Icons.camera_alt_outlined,
+                color: const Color(0xFF4A5BB5),
+                accentColor: const Color(0xFF6B7FD7),
+                onTap: onIdentifySeafood!,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -980,9 +1361,9 @@ class SummaryCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          const Text(
-            'Good morning!',
-            style: TextStyle(
+          Text(
+            timeOfDayGreeting(),
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 20,
               fontWeight: FontWeight.w900,
@@ -1110,6 +1491,7 @@ class FreezerScreen extends StatefulWidget {
     required this.items,
     required this.lossHistory,
     required this.priceHistory,
+    required this.marketInventory,
     required this.onAddItem,
     required this.onUpdateItem,
     required this.onDeleteItem,
@@ -1119,6 +1501,7 @@ class FreezerScreen extends StatefulWidget {
   final List<FreezerItem> items;
   final List<FreezerHistoryEntry> lossHistory;
   final List<PriceHistoryEntry> priceHistory;
+  final List<MarketInventoryItem> marketInventory;
   final ValueChanged<FreezerItem> onAddItem;
   final ValueChanged<FreezerItem> onUpdateItem;
   final ValueChanged<FreezerItem> onDeleteItem;
@@ -1130,6 +1513,51 @@ class FreezerScreen extends StatefulWidget {
 
 class _FreezerScreenState extends State<FreezerScreen> {
   int _tabIndex = 0;
+  final TextEditingController _searchController = TextEditingController();
+  String _categoryFilter = SeafoodCatalog.allCategoriesFilter;
+
+  Set<String> get _categoriesInFreezer => widget.items
+      .map(
+        (item) => SeafoodCatalog.resolveCategory(
+          item.species,
+          stored: item.category.isNotEmpty ? item.category : null,
+        ),
+      )
+      .toSet();
+
+  String get _effectiveCategoryFilter {
+    if (_categoryFilter == SeafoodCatalog.allCategoriesFilter) {
+      return _categoryFilter;
+    }
+    if (_categoriesInFreezer.contains(_categoryFilter)) {
+      return _categoryFilter;
+    }
+    return SeafoodCatalog.allCategoriesFilter;
+  }
+
+  List<SeafoodCategoryOption> get _visibleCategoryOptions =>
+      SeafoodCatalog.categoryOptionsWithItems(_categoriesInFreezer);
+
+  List<FreezerItem> get _filteredItems {
+    final query = _searchController.text;
+    return widget.items.where((item) {
+      final category = SeafoodCatalog.resolveCategory(
+        item.species,
+        stored: item.category.isNotEmpty ? item.category : null,
+      );
+      return SeafoodCatalog.matchesSearch(item.species, category, query) &&
+          SeafoodCatalog.matchesCategoryFilter(
+            category,
+            _effectiveCategoryFilter,
+          );
+    }).toList();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   Future<void> _confirmMarkLoss(FreezerItem item) async {
     var reason = item.daysRemaining < 0 ? 'expired' : 'spoiled';
@@ -1249,22 +1677,40 @@ class _FreezerScreenState extends State<FreezerScreen> {
           ),
           const SizedBox(height: 14),
           if (_tabIndex == 0) ...[
-            const SearchBox(),
-            const SizedBox(height: 16),
+            SearchBox(
+              controller: _searchController,
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 10),
+            if (_visibleCategoryOptions.isNotEmpty) ...[
+              SeafoodCategoryFilterBar(
+                selectedFilter: _effectiveCategoryFilter,
+                visibleOptions: _visibleCategoryOptions,
+                onSelected: (value) => setState(() => _categoryFilter = value),
+              ),
+              const SizedBox(height: 16),
+            ],
             if (widget.items.isEmpty)
               const EmptyCard(
                 icon: Icons.kitchen_outlined,
                 title: 'No active freezer items',
                 message:
                     'Scan a receipt or add seafood manually. Spoiled or used items appear under Loss history.',
-              ),
-            for (final item in widget.items)
-              FreezerTile(
-                item: item,
-                onEdit: () => _openAddItemSheet(context, existingItem: item),
-                onDelete: () => widget.onDeleteItem(item),
-                onMarkLoss: () => _confirmMarkLoss(item),
-              ),
+              )
+            else if (_filteredItems.isEmpty)
+              const EmptyCard(
+                icon: Icons.search_off_outlined,
+                title: 'No matches for your search',
+                message: 'Try a different search term or category filter.',
+              )
+            else
+              for (final item in _filteredItems)
+                FreezerTile(
+                  item: item,
+                  onEdit: () => _openAddItemSheet(context, existingItem: item),
+                  onDelete: () => widget.onDeleteItem(item),
+                  onMarkLoss: () => _confirmMarkLoss(item),
+                ),
           ] else if (widget.lossHistory.isEmpty)
             const EmptyCard(
               icon: Icons.history,
@@ -1307,6 +1753,7 @@ class _FreezerScreenState extends State<FreezerScreen> {
         linkedHistory: existingItem == null
             ? null
             : _linkedPriceHistory(existingItem),
+        marketInventory: widget.marketInventory,
         onSave: existingItem == null ? widget.onAddItem : widget.onUpdateItem,
       ),
     );
@@ -1396,11 +1843,13 @@ class AddItemForm extends StatefulWidget {
     super.key,
     this.existingItem,
     this.linkedHistory,
+    this.marketInventory = const [],
     required this.onSave,
   });
 
   final FreezerItem? existingItem;
   final PriceHistoryEntry? linkedHistory;
+  final List<MarketInventoryItem> marketInventory;
   final ValueChanged<FreezerItem> onSave;
 
   @override
@@ -1413,12 +1862,56 @@ class _AddItemFormState extends State<AddItemForm> {
   late final TextEditingController _expiryAmountController;
   late final TextEditingController _priceController;
   late String _iconKey;
+  late String _category;
   String _weightUnit = 'g';
   late DateTime _purchaseDate;
   late ExpiryInputMode _expiryMode;
   DateTime? _expiryCalendarDate;
   String? _imagePath;
   final ImagePicker _imagePicker = ImagePicker();
+
+  List<String> get _inventorySpeciesNames =>
+      MarketInventoryItem.distinctSpeciesNames(widget.marketInventory);
+
+  void _applySpeciesSelection(String raw) {
+    final resolved = SeafoodCatalog.resolveSpeciesName(
+      raw,
+      inventorySpecies: _inventorySpeciesNames,
+    );
+    _nameController.text = resolved;
+
+    final inventory = MarketInventoryItem.findBySpecies(
+      widget.marketInventory,
+      resolved,
+    );
+    final catalog = SeafoodCatalog.findByName(resolved);
+    final category = inventory != null && inventory.category.isNotEmpty
+        ? inventory.category
+        : (catalog != null
+            ? SeafoodCatalog.categoryFromIconKey(catalog.iconKey)
+            : SeafoodCatalog.resolveCategory(
+                resolved,
+                inventoryCategory: inventory?.category,
+              ));
+
+    final listPrice = inventory != null && inventory.pricePerKg > 0
+        ? inventory.pricePerKg
+        : catalog?.pricePerKg;
+    if (listPrice != null &&
+        listPrice > 0 &&
+        _priceController.text.trim().isEmpty) {
+      final weightValue = double.tryParse(_weightController.text) ?? 0;
+      final stockKg = weightValue > 0
+          ? WeightUnits.toKg(weightValue, _weightUnit)
+          : 0.5;
+      _priceController.text = (listPrice * stockKg).toStringAsFixed(2);
+    }
+
+    setState(() {
+      _category = category;
+      _iconKey = SeafoodCatalog.iconKeyForCategory(_category);
+    });
+  }
 
   static DateTime _dateOnly(DateTime value) =>
       DateTime(value.year, value.month, value.day);
@@ -1457,7 +1950,10 @@ class _AddItemFormState extends State<AddItemForm> {
   void initState() {
     super.initState();
     final item = widget.existingItem;
-    _iconKey = item?.iconKey ?? 'fish';
+    _category = item?.category.isNotEmpty == true
+        ? item!.category
+        : SeafoodCatalog.resolveCategory(item?.species ?? '');
+    _iconKey = item?.iconKey ?? SeafoodCatalog.iconKeyForCategory(_category);
     _imagePath = item?.imagePath;
     _nameController = TextEditingController(text: item?.species ?? '');
     _weightUnit = item?.displayWeightUnit ?? 'g';
@@ -1625,6 +2121,7 @@ class _AddItemFormState extends State<AddItemForm> {
                       onSelected: (_) {
                         setState(() {
                           _iconKey = option.key;
+                          _category = SeafoodCatalog.categoryFromIconKey(option.key);
                           _imagePath = null;
                         });
                         Navigator.pop(context);
@@ -1641,7 +2138,10 @@ class _AddItemFormState extends State<AddItemForm> {
   }
 
   void _save() {
-    final name = _nameController.text.trim();
+    final name = SeafoodCatalog.resolveSpeciesName(
+      _nameController.text,
+      inventorySpecies: _inventorySpeciesNames,
+    );
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter an item name.')),
@@ -1676,6 +2176,19 @@ class _AddItemFormState extends State<AddItemForm> {
       return;
     }
 
+    final inventory = MarketInventoryItem.findBySpecies(
+      widget.marketInventory,
+      name,
+    );
+    final category = inventory != null && inventory.category.isNotEmpty
+        ? inventory.category
+        : (_category.isNotEmpty
+            ? _category
+            : SeafoodCatalog.resolveCategory(
+                name,
+                inventoryCategory: inventory?.category,
+              ));
+
     widget.onSave(
       FreezerItem(
         id: widget.existingItem?.id,
@@ -1684,7 +2197,8 @@ class _AddItemFormState extends State<AddItemForm> {
         purchaseDate: _purchaseDate,
         bestBeforeDate: bestBefore,
         pricePerKg: pricePerKg,
-        iconKey: _iconKey,
+        iconKey: SeafoodCatalog.iconKeyForCategory(category),
+        category: category,
         imagePath: _imagePath,
         displayWeightUnit: _weightUnit,
         linkedPriceHistoryId: widget.existingItem?.linkedPriceHistoryId,
@@ -1743,43 +2257,90 @@ class _AddItemFormState extends State<AddItemForm> {
               ),
             ),
             const SizedBox(height: 18),
-            FormFieldBox(
-              label: 'ITEM NAME',
-              hint: 'e.g. Fresh Squid',
-              controller: _nameController,
-            ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: FormFieldBox(
-                    label: 'WEIGHT',
-                    hint: _weightUnit == 'kg' ? '0.5' : '500',
-                    controller: _weightController,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    value: _weightUnit,
-                    decoration: const InputDecoration(
-                      labelText: 'UNIT',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'ITEM NAME',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.8,
                     ),
-                    items: WeightUnits.options
-                        .map(
-                          (u) => DropdownMenuItem(value: u, child: Text(u)),
-                        )
-                        .toList(),
-                    onChanged: (value) {
-                      if (value == null) return;
-                      setState(() => _weightUnit = value);
+                  ),
+                  const SizedBox(height: 7),
+                  Autocomplete<String>(
+                    initialValue: TextEditingValue(text: _nameController.text),
+                    optionsBuilder: (textEditingValue) {
+                      return SeafoodCatalog.suggestSpeciesNames(
+                        textEditingValue.text,
+                        inventorySpecies: _inventorySpeciesNames,
+                      );
+                    },
+                    onSelected: _applySpeciesSelection,
+                    fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                      if (controller.text != _nameController.text) {
+                        controller.text = _nameController.text;
+                      }
+                      controller.addListener(() {
+                        if (_nameController.text != controller.text) {
+                          _nameController.text = controller.text;
+                        }
+                      });
+                      return TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        onEditingComplete: () {
+                          if (controller.text.trim().isNotEmpty) {
+                            _applySpeciesSelection(controller.text);
+                          }
+                          onFieldSubmitted();
+                        },
+                        decoration: const InputDecoration(
+                          hintText: 'Search inventory or catalog…',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 14,
+                          ),
+                        ),
+                      );
                     },
                   ),
-                ),
-              ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'CATEGORY',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.8,
+              ),
+            ),
+            const SizedBox(height: 7),
+            SeafoodCategoryFilterBar(
+              showAllOption: false,
+              selectedFilter: _category,
+              onSelected: (value) {
+                setState(() {
+                  _category = value;
+                  _iconKey = SeafoodCatalog.iconKeyForCategory(_category);
+                });
+              },
+            ),
+            const SizedBox(height: 10),
+            WeightUnitRow(
+              weightController: _weightController,
+              weightUnit: _weightUnit,
+              weightHint: _weightUnit == 'kg' ? '0.5' : '500',
+              onUnitChanged: (value) => setState(() => _weightUnit = value),
             ),
             if (widget.existingItem != null)
               Padding(
@@ -2031,6 +2592,251 @@ class ScanScreen extends StatelessWidget {
   }
 }
 
+class MarketPricesScreen extends StatefulWidget {
+  const MarketPricesScreen({
+    super.key,
+    required this.inventory,
+    this.isLoading = false,
+    this.errorMessage,
+    required this.onBackToHome,
+  });
+
+  final List<MarketInventoryItem> inventory;
+  final bool isLoading;
+  final String? errorMessage;
+  final VoidCallback onBackToHome;
+
+  @override
+  State<MarketPricesScreen> createState() => _MarketPricesScreenState();
+
+  static String _marketIconKey(MarketInventoryItem item) {
+    if (item.category.isNotEmpty) {
+      return SeafoodCatalog.iconKeyForCategory(item.category);
+    }
+    return SeafoodCatalog.iconKeyFor(item.species);
+  }
+}
+
+class _MarketPricesScreenState extends State<MarketPricesScreen> {
+  final TextEditingController _searchController = TextEditingController();
+  String _categoryFilter = SeafoodCatalog.allCategoriesFilter;
+
+  Set<String> get _categoriesInMarket =>
+      MarketInventoryItem.consolidateBySpecies(widget.inventory)
+          .map(
+            (item) => SeafoodCatalog.resolveCategory(
+              item.species,
+              inventoryCategory:
+                  item.category.isNotEmpty ? item.category : null,
+            ),
+          )
+          .toSet();
+
+  String get _effectiveCategoryFilter {
+    if (_categoryFilter == SeafoodCatalog.allCategoriesFilter) {
+      return _categoryFilter;
+    }
+    if (_categoriesInMarket.contains(_categoryFilter)) {
+      return _categoryFilter;
+    }
+    return SeafoodCatalog.allCategoriesFilter;
+  }
+
+  List<SeafoodCategoryOption> get _visibleCategoryOptions =>
+      SeafoodCatalog.categoryOptionsWithItems(_categoriesInMarket);
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<MarketInventoryItem> get _filteredPrices {
+    final consolidated =
+        MarketInventoryItem.consolidateBySpecies(widget.inventory);
+    final query = _searchController.text;
+    return consolidated.where((item) {
+      final category = SeafoodCatalog.resolveCategory(
+        item.species,
+        inventoryCategory: item.category.isNotEmpty ? item.category : null,
+      );
+      return SeafoodCatalog.matchesSearch(item.species, category, query) &&
+          SeafoodCatalog.matchesCategoryFilter(
+            category,
+            _effectiveCategoryFilter,
+          );
+    }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final prices = _filteredPrices;
+    final hasInStockPriced = widget.inventory.any(
+      (item) => item.pricePerKg > 0 && item.weightKg > 0,
+    );
+    final hasUnpricedStock = widget.inventory.any(
+      (item) => item.pricePerKg <= 0 && item.weightKg > 0,
+    );
+    final showFilters = !widget.isLoading &&
+        widget.errorMessage == null &&
+        (prices.isNotEmpty || hasInStockPriced);
+    final todayLabel = _formatMarketDate(DateTime.now());
+
+    return ScreenScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextButton.icon(
+            onPressed: widget.onBackToHome,
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.navy,
+              padding: const EdgeInsets.fromLTRB(0, 0, 8, 4),
+            ),
+            icon: const Icon(Icons.arrow_back_rounded, size: 20),
+            label: const Text(
+              'Back to dashboard',
+              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+            ),
+          ),
+          PageHeading(
+            title: 'Market Prices',
+            subtitle:
+                'Current ($todayLabel) list prices (RM/kg). '
+                'Updated daily following inventory changes at Boon Hua Fishery.',
+          ),
+          const SizedBox(height: 14),
+          if (widget.isLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 48),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (widget.errorMessage != null)
+            EmptyCard(
+              icon: Icons.lock_outline,
+              title: 'Could not load prices',
+              message: widget.errorMessage!,
+            )
+          else if (showFilters) ...[
+            SearchBox(
+              controller: _searchController,
+              hintText: 'Search seafood...',
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 10),
+            if (_visibleCategoryOptions.isNotEmpty) ...[
+              SeafoodCategoryFilterBar(
+                selectedFilter: _effectiveCategoryFilter,
+                visibleOptions: _visibleCategoryOptions,
+                onSelected: (value) => setState(() => _categoryFilter = value),
+              ),
+              const SizedBox(height: 14),
+            ],
+          ],
+          if (widget.isLoading || widget.errorMessage != null)
+            const SizedBox.shrink()
+          else if (prices.isEmpty && hasUnpricedStock)
+            const EmptyCard(
+              icon: Icons.payments_outlined,
+              title: 'Prices not set yet',
+              message:
+                  'Inventory stock exists but list prices are still RM 0.\nAdmin can set prices in the web Inventory module.',
+            )
+          else if (prices.isEmpty && hasInStockPriced)
+            const EmptyCard(
+              icon: Icons.search_off_outlined,
+              title: 'No matches for your search',
+              message: 'Try a different search term or category filter.',
+            )
+          else if (prices.isEmpty &&
+              widget.inventory.any((item) => item.pricePerKg > 0))
+            const EmptyCard(
+              icon: Icons.inventory_2_outlined,
+              title: 'Nothing in stock right now',
+              message:
+                  'Listed species are currently out of stock at Boon Hua Fishery. Check back later.',
+            )
+          else if (prices.isEmpty)
+            const EmptyCard(
+              icon: Icons.storefront_outlined,
+              title: 'No market prices yet',
+              message:
+                  'Admin can add stock and set list prices in the web Inventory module.',
+            )
+          else ...[
+            for (var index = 0; index < prices.length; index++) ...[
+              if (index > 0) const SizedBox(height: 8),
+              _MarketPriceTile(item: prices[index]),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MarketPriceTile extends StatelessWidget {
+  const _MarketPriceTile({required this.item});
+
+  final MarketInventoryItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      child: Row(
+        children: [
+          ItemVisualPreview(
+            iconKey: MarketPricesScreen._marketIconKey(item),
+            size: 52,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.species,
+                  style: const TextStyle(
+                    color: AppColors.ink,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 15,
+                  ),
+                ),
+                if (item.category.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    item.category,
+                    style: const TextStyle(
+                      color: AppColors.teal,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 2),
+                Text(
+                  '${item.weightKg.toStringAsFixed(1)} kg in stock',
+                  style: const TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            'RM ${item.pricePerKg.toStringAsFixed(2)}/kg',
+            style: const TextStyle(
+              color: AppColors.teal,
+              fontWeight: FontWeight.w900,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class CompareScreen extends StatefulWidget {
   const CompareScreen({
     super.key,
@@ -2042,8 +2848,9 @@ class CompareScreen extends StatefulWidget {
   });
 
   final List<PriceHistoryEntry> history;
-  final ValueChanged<PriceHistoryEntry> onSave;
-  final void Function(PriceHistoryEntry entry, {bool syncFreezer}) onUpdate;
+  final Future<void> Function(PriceHistoryEntry) onSave;
+  final Future<void> Function(PriceHistoryEntry entry, {bool syncFreezer})
+      onUpdate;
   final ValueChanged<PriceHistoryEntry> onDelete;
   final ParsedReceipt? latestReceipt;
 
@@ -2058,40 +2865,24 @@ class _CompareScreenState extends State<CompareScreen> {
   final _weightController = TextEditingController();
   final _normalizer = const PriceNormalizer();
   String _weightUnit = 'g';
-  ParsedReceipt? _appliedReceipt;
 
   @override
   void initState() {
     super.initState();
-    _resetDateField(DateTime.now());
-    _prefillFromReceipt(widget.latestReceipt);
+    _clearNormalizerForm();
   }
 
-  @override
-  void didUpdateWidget(covariant CompareScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.latestReceipt != oldWidget.latestReceipt &&
-        widget.latestReceipt != null &&
-        widget.latestReceipt != _appliedReceipt) {
-      _prefillFromReceipt(widget.latestReceipt);
-    }
+  void _clearNormalizerForm() {
+    _itemController.clear();
+    _priceController.clear();
+    _weightController.clear();
+    _weightUnit = 'g';
+    _resetDateField(DateTime.now());
   }
 
   void _resetDateField(DateTime date) {
     _dateController.text =
         '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
-  }
-
-  void _prefillFromReceipt(ParsedReceipt? receipt) {
-    if (receipt == null || receipt.items.isEmpty) return;
-    final item = receipt.items.first;
-    _appliedReceipt = receipt;
-    _itemController.text = item.species;
-    _resetDateField(receipt.purchaseDate);
-    _priceController.text = item.totalPrice.toStringAsFixed(2);
-    _weightController.text = (item.quantityKg * 1000).toStringAsFixed(0);
-    _weightUnit = 'g';
-    setState(() {});
   }
 
   double get _normalizedPrice {
@@ -2173,6 +2964,7 @@ class _CompareScreenState extends State<CompareScreen> {
                       child: FormFieldBox(
                         label: 'ITEM NAME',
                         controller: _itemController,
+                        onChanged: (_) => setState(() {}),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -2189,38 +2981,22 @@ class _CompareScreenState extends State<CompareScreen> {
                   label: 'ITEM PRICE (RM)',
                   prefix: 'RM ',
                   controller: _priceController,
+                  onChanged: (_) => setState(() {}),
                 ),
-                Row(
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: FormFieldBox(
-                        label: 'WEIGHT',
-                        controller: _weightController,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        key: ValueKey(_weightUnit),
-                        initialValue: _weightUnit,
-                        decoration: const InputDecoration(
-                          labelText: 'UNIT',
-                          border: OutlineInputBorder(),
-                          isDense: true,
-                        ),
-                        items: const [
-                          DropdownMenuItem(value: 'g', child: Text('g')),
-                          DropdownMenuItem(value: 'kg', child: Text('kg')),
-                          DropdownMenuItem(value: 'lb', child: Text('lb')),
-                        ],
-                        onChanged: (value) {
-                          if (value == null) return;
-                          setState(() => _weightUnit = value);
-                        },
-                      ),
-                    ),
-                  ],
+                WeightUnitRow(
+                  weightController: _weightController,
+                  weightUnit: _weightUnit,
+                  onUnitChanged: (value) => setState(() => _weightUnit = value),
+                  onWeightChanged: () => setState(() {}),
+                  bottomPadding: 14,
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () => setState(_clearNormalizerForm),
+                    icon: const Icon(Icons.clear_all, size: 18),
+                    label: const Text('Clear form'),
+                  ),
                 ),
                 SizedBox(
                   width: double.infinity,
@@ -2307,7 +3083,7 @@ class _CompareScreenState extends State<CompareScreen> {
                     style: FilledButton.styleFrom(
                       backgroundColor: AppColors.navyDark,
                     ),
-                    onPressed: () {
+                    onPressed: () async {
                       final species = _itemController.text.trim();
                       if (species.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -2324,7 +3100,7 @@ class _CompareScreenState extends State<CompareScreen> {
                             _priceController.text.replaceAll('RM', '').trim(),
                           ) ??
                           0;
-                      widget.onSave(
+                      await widget.onSave(
                         PriceHistoryEntry(
                           species: species,
                           pricePerKg: _normalizedPrice,
@@ -2335,6 +3111,8 @@ class _CompareScreenState extends State<CompareScreen> {
                           totalPriceRm: totalPrice > 0 ? totalPrice : null,
                         ),
                       );
+                      if (!mounted) return;
+                      setState(_clearNormalizerForm);
                     },
                     icon: const Icon(Icons.save_outlined),
                     label: const Text('Save to History'),
@@ -2364,7 +3142,8 @@ class PriceHistoryCard extends StatelessWidget {
   });
 
   final List<PriceHistoryEntry> entries;
-  final void Function(PriceHistoryEntry entry, {bool syncFreezer}) onUpdate;
+  final Future<void> Function(PriceHistoryEntry entry, {bool syncFreezer})
+      onUpdate;
   final ValueChanged<PriceHistoryEntry> onDelete;
 
   @override
@@ -2533,14 +3312,77 @@ class PriceHistoryCard extends StatelessWidget {
     BuildContext context,
     PriceHistoryEntry entry,
   ) async {
-    final normalizer = const PriceNormalizer();
-    final nameController = TextEditingController(text: entry.species);
-    final totalController = TextEditingController(
+    final result = await showDialog<_EditPriceHistoryResult>(
+      context: context,
+      builder: (context) => _EditPriceHistoryDialog(entry: entry),
+    );
+    if (result == null) return;
+
+    try {
+      await onUpdate(result.entry, syncFreezer: result.syncFreezer);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.syncFreezer
+                ? 'Price record and freezer item updated.'
+                : 'Price record updated.',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not update price record: $error'),
+          backgroundColor: AppColors.danger,
+        ),
+      );
+    }
+  }
+}
+
+class _EditPriceHistoryResult {
+  const _EditPriceHistoryResult({
+    required this.entry,
+    required this.syncFreezer,
+  });
+
+  final PriceHistoryEntry entry;
+  final bool syncFreezer;
+}
+
+class _EditPriceHistoryDialog extends StatefulWidget {
+  const _EditPriceHistoryDialog({required this.entry});
+
+  final PriceHistoryEntry entry;
+
+  @override
+  State<_EditPriceHistoryDialog> createState() =>
+      _EditPriceHistoryDialogState();
+}
+
+class _EditPriceHistoryDialogState extends State<_EditPriceHistoryDialog> {
+  static const _normalizer = PriceNormalizer();
+
+  late final TextEditingController _nameController;
+  late final TextEditingController _totalController;
+  late final TextEditingController _weightController;
+  late final TextEditingController _dateController;
+  late String _weightUnit;
+  late bool _syncFreezer;
+
+  @override
+  void initState() {
+    super.initState();
+    final entry = widget.entry;
+    _nameController = TextEditingController(text: entry.species);
+    _totalController = TextEditingController(
       text: (entry.totalPriceRm ??
               (entry.pricePerKg * (entry.quantityKg ?? 0)))
           .toStringAsFixed(2),
     );
-    final weightController = TextEditingController(
+    _weightController = TextEditingController(
       text: entry.weightValue != null
           ? entry.weightValue!.toStringAsFixed(entry.weightUnit == 'g' ? 0 : 2)
           : (entry.quantityKg != null
@@ -2548,136 +3390,36 @@ class PriceHistoryCard extends StatelessWidget {
                   .toStringAsFixed(entry.weightUnit == 'g' ? 0 : 2)
               : ''),
     );
-    var weightUnit = entry.weightUnit;
-    final dateController = TextEditingController(
+    _weightUnit = WeightUnits.options.contains(entry.weightUnit)
+        ? entry.weightUnit
+        : 'g';
+    _dateController = TextEditingController(
       text:
           '${entry.recordedAt.day.toString().padLeft(2, '0')}/${entry.recordedAt.month.toString().padLeft(2, '0')}/${entry.recordedAt.year}',
     );
-    var syncFreezer = entry.freezerItemId != null;
+    _syncFreezer = entry.freezerItemId != null;
+  }
 
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          final weight = double.tryParse(weightController.text) ?? 0;
-          final total =
-              double.tryParse(totalController.text.replaceAll('RM', '').trim()) ??
-                  0;
-          final previewPerKg = weight > 0
-              ? normalizer.normalizeFromWeight(
-                  totalPrice: total,
-                  weightValue: weight,
-                  unit: weightUnit,
-                )
-              : entry.pricePerKg;
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _totalController.dispose();
+    _weightController.dispose();
+    _dateController.dispose();
+    super.dispose();
+  }
 
-          return AlertDialog(
-            title: const Text('Edit price record'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: nameController,
-                    decoration: const InputDecoration(labelText: 'Seafood name'),
-                  ),
-                  TextField(
-                    controller: totalController,
-                    decoration: const InputDecoration(
-                      labelText: 'Total paid (RM)',
-                    ),
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(
-                        flex: 2,
-                        child: TextField(
-                          controller: weightController,
-                          decoration: const InputDecoration(labelText: 'Weight'),
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          value: weightUnit,
-                          decoration: const InputDecoration(labelText: 'Unit'),
-                          items: WeightUnits.options
-                              .map(
-                                (u) =>
-                                    DropdownMenuItem(value: u, child: Text(u)),
-                              )
-                              .toList(),
-                          onChanged: (v) {
-                            if (v == null) return;
-                            setDialogState(() => weightUnit = v);
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'RM ${previewPerKg.toStringAsFixed(2)}/kg',
-                      style: const TextStyle(
-                        color: AppColors.teal,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  TextField(
-                    controller: dateController,
-                    decoration:
-                        const InputDecoration(labelText: 'Date (DD/MM/YYYY)'),
-                  ),
-                  if (entry.freezerItemId != null)
-                    CheckboxListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: syncFreezer,
-                      onChanged: (v) =>
-                          setDialogState(() => syncFreezer = v ?? false),
-                      title: const Text(
-                        'Also update virtual freezer item',
-                        style: TextStyle(fontSize: 13),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('Save'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-
-    if (saved != true) {
-      nameController.dispose();
-      totalController.dispose();
-      weightController.dispose();
-      dateController.dispose();
+  void _save() {
+    final species = _nameController.text.trim();
+    if (species.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a seafood name.')),
+      );
       return;
     }
 
-    final species = nameController.text.trim();
-    if (species.isEmpty) return;
-
-    final parts = dateController.text.split('/');
-    DateTime recordedAt = entry.recordedAt;
+    final parts = _dateController.text.split('/');
+    var recordedAt = widget.entry.recordedAt;
     if (parts.length == 3) {
       final day = int.tryParse(parts[0]);
       final month = int.tryParse(parts[1]);
@@ -2687,37 +3429,115 @@ class PriceHistoryCard extends StatelessWidget {
       }
     }
 
-    final weight = double.tryParse(weightController.text) ?? 0;
+    final weight = double.tryParse(_weightController.text) ?? 0;
     final total =
-        double.tryParse(totalController.text.replaceAll('RM', '').trim()) ?? 0;
-    final quantityKg = weight > 0 ? WeightUnits.toKg(weight, weightUnit) : null;
+        double.tryParse(_totalController.text.replaceAll('RM', '').trim()) ?? 0;
+    final quantityKg = weight > 0 ? WeightUnits.toKg(weight, _weightUnit) : null;
     final pricePerKg = weight > 0 && total > 0
-        ? normalizer.normalizeFromWeight(
+        ? _normalizer.normalizeFromWeight(
             totalPrice: total,
             weightValue: weight,
-            unit: weightUnit,
+            unit: _weightUnit,
           )
-        : entry.pricePerKg;
+        : widget.entry.pricePerKg;
 
-    onUpdate(
-      PriceHistoryEntry(
-        id: entry.id,
-        species: species,
-        pricePerKg: pricePerKg,
-        recordedAt: recordedAt,
-        quantityKg: quantityKg,
-        weightValue: weight > 0 ? weight : null,
-        weightUnit: weightUnit,
-        totalPriceRm: total > 0 ? total : entry.totalPriceRm,
-        freezerItemId: entry.freezerItemId,
+    Navigator.pop(
+      context,
+      _EditPriceHistoryResult(
+        syncFreezer: _syncFreezer,
+        entry: PriceHistoryEntry(
+          id: widget.entry.id,
+          species: species,
+          pricePerKg: pricePerKg,
+          recordedAt: recordedAt,
+          quantityKg: quantityKg,
+          weightValue: weight > 0 ? weight : null,
+          weightUnit: _weightUnit,
+          totalPriceRm: total > 0 ? total : widget.entry.totalPriceRm,
+          freezerItemId: widget.entry.freezerItemId,
+        ),
       ),
-      syncFreezer: syncFreezer,
     );
+  }
 
-    nameController.dispose();
-    totalController.dispose();
-    weightController.dispose();
-    dateController.dispose();
+  @override
+  Widget build(BuildContext context) {
+    final weight = double.tryParse(_weightController.text) ?? 0;
+    final total =
+        double.tryParse(_totalController.text.replaceAll('RM', '').trim()) ?? 0;
+    final previewPerKg = weight > 0
+        ? _normalizer.normalizeFromWeight(
+            totalPrice: total,
+            weightValue: weight,
+            unit: _weightUnit,
+          )
+        : widget.entry.pricePerKg;
+
+    return AlertDialog(
+      title: const Text('Edit price record'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _nameController,
+              decoration: const InputDecoration(labelText: 'Seafood name'),
+            ),
+            TextField(
+              controller: _totalController,
+              decoration: const InputDecoration(
+                labelText: 'Total paid (RM)',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            WeightUnitRow(
+              weightController: _weightController,
+              weightUnit: _weightUnit,
+              useCompactLabels: true,
+              onUnitChanged: (value) => setState(() => _weightUnit = value),
+              onWeightChanged: () => setState(() {}),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'RM ${previewPerKg.toStringAsFixed(2)}/kg',
+                style: const TextStyle(
+                  color: AppColors.teal,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            TextField(
+              controller: _dateController,
+              decoration: const InputDecoration(labelText: 'Date (DD/MM/YYYY)'),
+            ),
+            if (widget.entry.freezerItemId != null)
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _syncFreezer,
+                onChanged: (v) => setState(() => _syncFreezer = v ?? false),
+                title: const Text(
+                  'Also update virtual freezer item',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Save'),
+        ),
+      ],
+    );
   }
 }
 
@@ -2834,6 +3654,34 @@ class _RecipesScreenState extends State<RecipesScreen> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.navy,
+                side: const BorderSide(color: AppColors.navy),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SeafoodIdentifyScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.camera_alt_outlined),
+              label: const Text('Identify seafood from photo (preview)'),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Photo ID is not fully developed yet and is not always 100% accurate. Use one clear seafood — avoid mixed piles, ice glare, and blur.',
+            style: TextStyle(color: AppColors.muted, fontSize: 11, height: 1.35),
           ),
           const SizedBox(height: 12),
           SizedBox(
@@ -3566,6 +4414,17 @@ class SeafoodTile extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
+                if (item.category.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    item.category,
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 Text(
                   WeightUnits.formatStockKg(
                     item.stockKg,
@@ -3635,6 +4494,17 @@ class FreezerTile extends StatelessWidget {
                     fontSize: 16,
                   ),
                 ),
+                if (item.category.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    item.category,
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 Text(
                   WeightUnits.formatStockKg(
                     item.stockKg,
@@ -3864,14 +4734,25 @@ class _QuickActionCardState extends State<QuickActionCard> {
 }
 
 class SearchBox extends StatelessWidget {
-  const SearchBox({super.key});
+  const SearchBox({
+    super.key,
+    this.controller,
+    this.hintText = 'Search items...',
+    this.onChanged,
+  });
+
+  final TextEditingController? controller;
+  final String hintText;
+  final ValueChanged<String>? onChanged;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
+      controller: controller,
+      onChanged: onChanged,
       decoration: InputDecoration(
         prefixIcon: const Icon(Icons.search, color: Color(0xFF9AA4B2)),
-        hintText: 'Search items...',
+        hintText: hintText,
         hintStyle: const TextStyle(color: Color(0xFF9AA4B2)),
         filled: true,
         fillColor: Colors.white,
@@ -3889,6 +4770,158 @@ class SearchBox extends StatelessWidget {
   }
 }
 
+class SeafoodCategoryFilterBar extends StatelessWidget {
+  const SeafoodCategoryFilterBar({
+    super.key,
+    required this.selectedFilter,
+    required this.onSelected,
+    this.showAllOption = true,
+    this.visibleOptions,
+  });
+
+  final String selectedFilter;
+  final ValueChanged<String> onSelected;
+  final bool showAllOption;
+  /// When set, only these category chips are shown (empty categories hidden).
+  final List<SeafoodCategoryOption>? visibleOptions;
+
+  @override
+  Widget build(BuildContext context) {
+    final options = visibleOptions ?? SeafoodCatalog.categoryOptions;
+    if (options.isEmpty && !showAllOption) {
+      return const SizedBox.shrink();
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          if (showAllOption) ...[
+            FilterChip(
+              label: const Text('All'),
+              selected: selectedFilter == SeafoodCatalog.allCategoriesFilter,
+              onSelected: (_) =>
+                  onSelected(SeafoodCatalog.allCategoriesFilter),
+            ),
+            if (options.isNotEmpty) const SizedBox(width: 8),
+          ],
+          for (final option in options) ...[
+            FilterChip(
+              label: Text('${option.emoji} ${option.label}'),
+              selected: selectedFilter == option.value,
+              onSelected: (_) => onSelected(option.value),
+            ),
+            const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class WeightUnitRow extends StatelessWidget {
+  const WeightUnitRow({
+    super.key,
+    required this.weightController,
+    required this.weightUnit,
+    required this.onUnitChanged,
+    this.weightHint,
+    this.onWeightChanged,
+    this.bottomPadding = 0,
+    this.useCompactLabels = false,
+  });
+
+  final TextEditingController weightController;
+  final String weightUnit;
+  final ValueChanged<String> onUnitChanged;
+  final String? weightHint;
+  final VoidCallback? onWeightChanged;
+  final double bottomPadding;
+  final bool useCompactLabels;
+
+  static const _labelStyle = TextStyle(
+    color: AppColors.muted,
+    fontSize: 11,
+    fontWeight: FontWeight.w900,
+    letterSpacing: 0.8,
+  );
+
+  static InputDecoration _fieldDecoration({String? hint, String? label}) {
+    return InputDecoration(
+      hintText: hint,
+      labelText: label,
+      filled: true,
+      fillColor: const Color(0xFFFAFBFC),
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      enabledBorder: OutlineInputBorder(
+        borderSide: const BorderSide(color: AppColors.line),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderSide: const BorderSide(color: AppColors.teal),
+        borderRadius: BorderRadius.circular(8),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final weightLabel = useCompactLabels ? 'Weight' : 'WEIGHT';
+    final unitLabel = useCompactLabels ? 'Unit' : 'UNIT';
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottomPadding),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                flex: 2,
+                child: Text(weightLabel, style: _labelStyle),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Text(unitLabel, style: _labelStyle)),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: weightController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  onChanged: (_) => onWeightChanged?.call(),
+                  decoration: _fieldDecoration(hint: weightHint),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  value: weightUnit,
+                  decoration: _fieldDecoration(),
+                  isExpanded: true,
+                  items: WeightUnits.options
+                      .map((u) => DropdownMenuItem(value: u, child: Text(u)))
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) onUnitChanged(value);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class FormFieldBox extends StatelessWidget {
   const FormFieldBox({
     super.key,
@@ -3899,6 +4932,7 @@ class FormFieldBox extends StatelessWidget {
     this.suffix,
     this.suffixIcon,
     this.obscureText = false,
+    this.onChanged,
   });
 
   final String label;
@@ -3908,6 +4942,7 @@ class FormFieldBox extends StatelessWidget {
   final String? suffix;
   final IconData? suffixIcon;
   final bool obscureText;
+  final ValueChanged<String>? onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -3929,7 +4964,7 @@ class FormFieldBox extends StatelessWidget {
           TextField(
             controller: controller,
             obscureText: obscureText,
-            onChanged: (_) => (context as Element).markNeedsBuild(),
+            onChanged: onChanged,
             decoration: InputDecoration(
               hintText: hint,
               prefixText: prefix,
@@ -3979,39 +5014,45 @@ class BottomNavBar extends StatelessWidget {
       elevation: 10,
       height: 72,
       shape: const CircularNotchedRectangle(),
-      notchMargin: 8,
+      notchMargin: 10,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: List.generate(items.length, (index) {
-          final selected = selectedIndex == index;
-          final item = items[index];
-          return Expanded(
-            child: InkWell(
-              onTap: () => onSelect(index),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    item.icon,
-                    color: selected ? AppColors.teal : const Color(0xFF9AA4B2),
-                    size: 21,
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    item.label,
-                    style: TextStyle(
-                      color: selected
-                          ? AppColors.teal
-                          : const Color(0xFF9AA4B2),
-                      fontSize: 10,
-                      fontWeight: selected ? FontWeight.w900 : FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
+        children: [
+          Expanded(child: _navButton(context, items, 0)),
+          Expanded(child: _navButton(context, items, 1)),
+          const SizedBox(width: 72),
+          Expanded(child: _navButton(context, items, 2)),
+          Expanded(child: _navButton(context, items, 3)),
+        ],
+      ),
+    );
+  }
+
+  Widget _navButton(BuildContext context, List<_NavItem> items, int index) {
+    final selected = selectedIndex == index;
+    final item = items[index];
+    return InkWell(
+      onTap: () => onSelect(index),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            item.icon,
+            color: selected ? AppColors.teal : const Color(0xFF9AA4B2),
+            size: 21,
+          ),
+          const SizedBox(height: 3),
+          Text(
+            item.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: selected ? AppColors.teal : const Color(0xFF9AA4B2),
+              fontSize: 10,
+              fontWeight: selected ? FontWeight.w900 : FontWeight.w600,
             ),
-          );
-        }),
+          ),
+        ],
       ),
     );
   }
@@ -4099,10 +5140,109 @@ class ItemVisualPreview extends StatelessWidget {
   }
 }
 
-class ReceiptReviewSheet extends StatelessWidget {
+class ReceiptReviewSheet extends StatefulWidget {
   const ReceiptReviewSheet({super.key, required this.receipt});
 
   final ParsedReceipt receipt;
+
+  @override
+  State<ReceiptReviewSheet> createState() => _ReceiptReviewSheetState();
+}
+
+class _EditableReceiptRow {
+  _EditableReceiptRow({
+    required this.speciesController,
+    required this.weightController,
+    required this.totalController,
+  });
+
+  final TextEditingController speciesController;
+  final TextEditingController weightController;
+  final TextEditingController totalController;
+
+  void dispose() {
+    speciesController.dispose();
+    weightController.dispose();
+    totalController.dispose();
+  }
+}
+
+class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
+  final _normalizer = const PriceNormalizer();
+  late final List<_EditableReceiptRow> _rows;
+  int _focusedIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusedIndex = widget.receipt.focusedItemIndex.clamp(
+      0,
+      widget.receipt.items.isEmpty ? 0 : widget.receipt.items.length - 1,
+    );
+    if (widget.receipt.items.isEmpty) {
+      _rows = List.generate(
+        2,
+        (_) => _EditableReceiptRow(
+          speciesController: TextEditingController(),
+          weightController: TextEditingController(),
+          totalController: TextEditingController(),
+        ),
+      );
+    } else {
+      _rows = widget.receipt.items
+          .map(
+            (item) => _EditableReceiptRow(
+              speciesController: TextEditingController(text: item.species),
+              weightController: TextEditingController(
+                text: item.quantityKg.toStringAsFixed(3),
+              ),
+              totalController: TextEditingController(
+                text: item.totalPrice.toStringAsFixed(2),
+              ),
+            ),
+          )
+          .toList();
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final row in _rows) {
+      row.dispose();
+    }
+    super.dispose();
+  }
+
+  ParsedReceipt? _buildReviewedReceipt() {
+    final items = <ReceiptItem>[];
+    var focusedOutputIndex = 0;
+    for (var i = 0; i < _rows.length; i++) {
+      final row = _rows[i];
+      final species = row.speciesController.text.trim();
+      if (species.isEmpty) continue;
+      final quantityKg = double.tryParse(row.weightController.text) ?? 0;
+      final totalPrice = double.tryParse(row.totalController.text) ?? 0;
+      if (quantityKg <= 0 && totalPrice <= 0) continue;
+      final qty = quantityKg > 0 ? quantityKg : 1.0;
+      if (i == _focusedIndex) focusedOutputIndex = items.length;
+      items.add(
+        ReceiptItem(
+          species: species,
+          quantityKg: qty,
+          totalPrice: totalPrice,
+          pricePerKg: _normalizer.calculatePricePerKg(
+            totalPrice: totalPrice,
+            quantityKg: qty,
+          ),
+        ),
+      );
+    }
+    if (items.isEmpty) return null;
+    return widget.receipt.copyWith(
+      items: items,
+      focusedItemIndex: focusedOutputIndex.clamp(0, items.length - 1),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4113,81 +5253,191 @@ class ReceiptReviewSheet extends StatelessWidget {
         top: 16,
         bottom: MediaQuery.of(context).viewInsets.bottom + 20,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Review scanned receipt',
-            style: TextStyle(
-              color: AppColors.ink,
-              fontSize: 20,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Purchase date: ${_formatDate(receipt.purchaseDate)} · Expiry recommendation: ${FreezerService.defaultShelfLifeDays} days',
-            style: const TextStyle(color: AppColors.muted, fontSize: 12),
-          ),
-          const SizedBox(height: 14),
-          for (final item in receipt.items)
-            Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                border: Border.all(color: AppColors.line),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          item.species,
-                          style: const TextStyle(
-                            color: AppColors.ink,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                        Text(
-                          '${item.quantityKg.toStringAsFixed(2)} kg',
-                          style: const TextStyle(color: AppColors.muted),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Text(
-                    'RM ${item.totalPrice.toStringAsFixed(2)}',
-                    style: const TextStyle(
-                      color: AppColors.teal,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ],
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Review scanned receipt',
+              style: TextStyle(
+                color: AppColors.ink,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
               ),
             ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('Cancel'),
+            const SizedBox(height: 6),
+            Text(
+              'Purchase date: ${_formatDate(widget.receipt.purchaseDate)} · Expiry recommendation: ${FreezerService.defaultShelfLifeDays} days',
+              style: const TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
+            const SizedBox(height: 6),
+            if (widget.receipt.rawText.trim().isEmpty) ...[
+              const Text(
+                'The photo was too blurry to read automatically. Type each item name, weight in kg, and total paid.',
+                style: TextStyle(color: AppColors.muted, fontSize: 12, height: 1.4),
+              ),
+              const SizedBox(height: 8),
+            ] else if (widget.receipt.items.isEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF5F7FA),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.line),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Detected text',
+                      style: TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      widget.receipt.rawText,
+                      style: const TextStyle(
+                        color: AppColors.ink,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: FilledButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('Add to Freezer'),
+              const SizedBox(height: 10),
+              const Text(
+                'Handwriting may not parse perfectly. Fill in the fields below from your note.',
+                style: TextStyle(color: AppColors.muted, fontSize: 11),
+              ),
+              const SizedBox(height: 6),
+            ] else ...[
+              const Text(
+                'Edit each line before saving. Tap a row to use it in Compare.',
+                style: TextStyle(color: AppColors.muted, fontSize: 11),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'OCR confidence: ${(widget.receipt.parseConfidence * 100).toStringAsFixed(0)}% '
+                '${widget.receipt.parseConfidence >= 0.85 ? '(meets 85% target)' : '(review fields carefully)'}',
+                style: TextStyle(
+                  color: widget.receipt.parseConfidence >= 0.85
+                      ? AppColors.teal
+                      : const Color(0xFFE65100),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
+              const SizedBox(height: 6),
             ],
-          ),
-        ],
+            for (var i = 0; i < _rows.length; i++)
+              _buildEditableRow(i),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () {
+                      final reviewed = _buildReviewedReceipt();
+                      if (reviewed == null) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Add at least one item with a name and weight or price.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      Navigator.pop(context, reviewed);
+                    },
+                    child: const Text('Add to Freezer'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEditableRow(int index) {
+    final row = _rows[index];
+    final selected = _focusedIndex == index;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: selected ? AppColors.teal : AppColors.line,
+          width: selected ? 1.5 : 1,
+        ),
+        borderRadius: BorderRadius.circular(8),
+        color: selected ? AppColors.teal.withValues(alpha: 0.04) : null,
+      ),
+      child: InkWell(
+        onTap: () => setState(() => _focusedIndex = index),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Item ${index + 1}',
+                  style: TextStyle(
+                    color: selected ? AppColors.teal : AppColors.muted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                if (selected) ...[
+                  const SizedBox(width: 6),
+                  const Icon(Icons.check_circle, size: 14, color: AppColors.teal),
+                ],
+              ],
+            ),
+            const SizedBox(height: 8),
+            FormFieldBox(
+              label: 'SPECIES',
+              controller: row.speciesController,
+              onChanged: (_) => setState(() => _focusedIndex = index),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: FormFieldBox(
+                    label: 'WEIGHT (KG)',
+                    controller: row.weightController,
+                    onChanged: (_) => setState(() => _focusedIndex = index),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FormFieldBox(
+                    label: 'TOTAL (RM)',
+                    prefix: 'RM ',
+                    controller: row.totalController,
+                    onChanged: (_) => setState(() => _focusedIndex = index),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4201,4 +5451,12 @@ String _formatDate(DateTime date) {
   return '${date.year.toString().padLeft(4, '0')}-'
       '${date.month.toString().padLeft(2, '0')}-'
       '${date.day.toString().padLeft(2, '0')}';
+}
+
+String _formatMarketDate(DateTime date) {
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  return '${date.day} ${months[date.month - 1]} ${date.year}';
 }
