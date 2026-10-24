@@ -11,13 +11,15 @@ import urllib.parse
 import urllib.request
 from typing import Any, List, Optional
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
+# Gemini 2.0 Flash IDs are shut down (404). Prefer current Flash / Flash-Lite.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_MODEL_FALLBACKS = (
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
     "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
 )
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 

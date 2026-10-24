@@ -83,16 +83,18 @@ def _models_to_try(api_key: str | None = None) -> list[str]:
     preferred = [
         GEMINI_MODEL,
         *GEMINI_MODEL_FALLBACKS,
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-flash-latest",
         "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
-        "gemini-flash-latest",
     ]
     ordered: list[str] = []
     for name in [*discovered, *preferred]:
         n = (name or "").strip()
-        if not n or n.startswith("gemini-1.5"):
+        # Retired / shut-down IDs return HTTP 404 on generateContent.
+        if not n or n.startswith("gemini-1.5") or n.startswith("gemini-2.0"):
             continue
         if n not in ordered:
             ordered.append(n)
@@ -436,15 +438,7 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
                 )
                 print(f"WARN: Gemini timeout on {model}: {exc}")
                 break
-            except urllib.error.URLError as exc:
-                reason = str(getattr(exc, "reason", exc))
-                if "timed out" in reason.lower():
-                    last_error = RuntimeError(
-                        "Gemini timed out while reading the photo. Try a smaller cropped photo."
-                    )
-                    print(f"WARN: Gemini URL timeout on {model}: {exc}")
-                    break
-                raise RuntimeError(f"Gemini network error: {exc}") from exc
+            # HTTPError is a URLError subclass — handle it before the generic URLError.
             except urllib.error.HTTPError as exc:
                 last_http = exc
                 if exc.code == 429 and attempt < 2:
@@ -454,6 +448,15 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
                     last_error = RuntimeError(_gemini_error_message(exc))
                     break
                 raise RuntimeError(_gemini_error_message(exc)) from exc
+            except urllib.error.URLError as exc:
+                reason = str(getattr(exc, "reason", exc))
+                if "timed out" in reason.lower():
+                    last_error = RuntimeError(
+                        "Gemini timed out while reading the photo. Try a smaller cropped photo."
+                    )
+                    print(f"WARN: Gemini URL timeout on {model}: {exc}")
+                    break
+                raise RuntimeError(f"Gemini network error: {exc}") from exc
 
         if last_http is not None and last_http.code in (404, 400):
             continue
