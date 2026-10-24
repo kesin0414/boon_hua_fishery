@@ -253,12 +253,20 @@ def suggest_recipes(request: RecipeRequest):
 
 
 def _rate_limited_error_message(message: str) -> bool:
+    """True only for temporary throttling — not billing/quota exhaustion."""
     lower = message.lower()
+    if (
+        "insufficient_quota" in lower
+        or "billing" in lower
+        or "credit" in lower
+        or "quota is empty" in lower
+        or "spend limit" in lower
+    ):
+        return False
     return (
         "rate-limited" in lower
         or "too many requests" in lower
-        or "429" in message
-        or "quota" in lower
+        or "temporarily rate-limited" in lower
     )
 
 

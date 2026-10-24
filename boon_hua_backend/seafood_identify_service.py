@@ -123,13 +123,15 @@ def identify_seafood_from_image(
         return _identify_with_openai(image_b64=raw, mime=mime, api_key=openai_key)
 
     def try_gemini() -> dict[str, Any]:
+        if not gemini_key:
+            raise RuntimeError("GEMINI_API_KEY not set")
         if not _valid_gemini_key(gemini_key):
             raise RuntimeError(
                 "GEMINI_API_KEY does not look like a Google AI Studio key (expected AIza… or AQ.…)."
             )
         return _identify_with_gemini(image_b64=raw, mime=mime, api_key=gemini_key)
 
-    # Prefer the same provider the rest of the app uses (Render currently uses OpenAI).
+    # Photo ID: prefer Gemini when available (cheaper free tier, avoids OpenAI quota 429s).
     ordered: list[tuple[str, Any]] = []
     if choice == "openai":
         if openai_key:
@@ -142,11 +144,10 @@ def identify_seafood_from_image(
         if openai_key:
             ordered.append(("openai", try_openai))
     else:
-        # auto: match recipe provider preference (OpenAI first when both exist)
-        if openai_key:
-            ordered.append(("openai", try_openai))
         if gemini_key:
             ordered.append(("gemini", try_gemini))
+        if openai_key:
+            ordered.append(("openai", try_openai))
 
     if not ordered:
         raise RuntimeError(
@@ -159,9 +160,19 @@ def identify_seafood_from_image(
             result["provider"] = name
             return result
         except Exception as exc:
+            print(f"WARN: seafood identify via {name} failed: {exc}")
             errors.append(f"{name}: {exc}")
 
     raise RuntimeError("; ".join(errors) if errors else "Seafood identify request failed")
+
+
+def _openai_error_payload(body_text: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(body_text or "{}")
+    except json.JSONDecodeError:
+        return {}
+    err = parsed.get("error")
+    return err if isinstance(err, dict) else {}
 
 
 def _identify_with_openai(*, image_b64: str, mime: str, api_key: str) -> dict[str, Any]:
@@ -170,7 +181,7 @@ def _identify_with_openai(*, image_b64: str, mime: str, api_key: str) -> dict[st
 
     # Vision-capable chat models; fall back from configured text model if needed.
     models: list[str] = []
-    for name in (OPENAI_MODEL, "gpt-4o-mini", "gpt-4o"):
+    for name in ("gpt-4o-mini", OPENAI_MODEL, "gpt-4o"):
         n = (name or "").strip()
         if n and n not in models:
             models.append(n)
@@ -196,7 +207,8 @@ def _identify_with_openai(*, image_b64: str, mime: str, api_key: str) -> dict[st
                         {"type": "text", "text": user_text},
                         {
                             "type": "image_url",
-                            "image_url": {"url": data_url, "detail": "high"},
+                            # "low" uses fewer tokens — helps free-tier rate/quota limits.
+                            "image_url": {"url": data_url, "detail": "low"},
                         },
                     ],
                 },
@@ -225,16 +237,70 @@ def _identify_with_openai(*, image_b64: str, mime: str, api_key: str) -> dict[st
                 body_text = exc.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
-            if exc.code == 429:
-                raise RuntimeError(
-                    "AI is temporarily rate-limited (too many requests). "
-                    "Wait about a minute and try again."
-                ) from exc
+            err = _openai_error_payload(body_text)
+            err_code = str(err.get("code") or "").lower()
+            err_type = str(err.get("type") or "").lower()
+            err_msg = str(err.get("message") or body_text[:180] or exc.reason or "").strip()
+
             if exc.code in (401, 403):
                 raise RuntimeError(
                     "OpenAI API key was rejected. Check OPENAI_API_KEY on the server."
                 ) from exc
-            snippet = (body_text[:180] or exc.reason or "unknown error").strip()
+
+            # Billing / spend / prepaid credits exhausted — retrying will not help.
+            if exc.code == 429 and (
+                err_code in {
+                    "insufficient_quota",
+                    "credit_balance_exhausted",
+                    "organization_usage_limit_exceeded",
+                    "organization_spend_limit_exceeded",
+                    "project_spend_limit_exceeded",
+                }
+                or "insufficient_quota" in err_type
+                or "quota" in err_msg.lower()
+                or "billing" in err_msg.lower()
+                or "credit" in err_msg.lower()
+            ):
+                raise RuntimeError(
+                    "OpenAI billing/quota is empty for this API key. "
+                    "Add credits at platform.openai.com/account/billing, "
+                    "or set GEMINI_API_KEY on Render for free photo ID."
+                ) from exc
+
+            if exc.code == 429:
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                wait_s = 2
+                if retry_after:
+                    try:
+                        wait_s = max(1, min(20, int(retry_after)))
+                    except ValueError:
+                        wait_s = 2
+                time.sleep(wait_s)
+                # One more attempt on the same model after a short pause.
+                try:
+                    retry_req = urllib.request.Request(
+                        "https://api.openai.com/v1/chat/completions",
+                        data=json.dumps(body).encode("utf-8"),
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {api_key}",
+                        },
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(retry_req, timeout=70) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+                    choices = data.get("choices") or []
+                    if not choices:
+                        raise RuntimeError("OpenAI returned no choices")
+                    text = choices[0].get("message", {}).get("content") or ""
+                    return _normalize_identify_result(text)
+                except urllib.error.HTTPError as retry_exc:
+                    raise RuntimeError(
+                        "AI is temporarily rate-limited (too many requests). "
+                        "Wait about a minute and try again."
+                    ) from retry_exc
+
+            snippet = err_msg or "unknown error"
             last_error = RuntimeError(f"OpenAI HTTP {exc.code}: {snippet}")
             # Try next vision model on 400/404.
             if exc.code in (400, 404):
