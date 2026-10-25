@@ -1335,15 +1335,15 @@ class ReceiptScanner {
     final image = await _imagePicker.pickImage(
       source: source,
       preferredCameraDevice: CameraDevice.rear,
-      imageQuality: 100,
-      maxWidth: 2400,
+      imageQuality: 85,
+      maxWidth: 1600,
     );
     if (image == null) {
       return const ScanResult(cancelled: true);
     }
 
     // Let the camera activity finish resuming before opening the cropper.
-    await Future<void>.delayed(const Duration(milliseconds: 350));
+    await Future<void>.delayed(const Duration(milliseconds: 200));
 
     String imagePath = image.path;
     try {
@@ -1369,22 +1369,29 @@ class ReceiptScanner {
             )
           : _parser.parse(raw);
 
-      // Always ask Gemini for handwriting — ML Kit alone is weak on messy notes.
-      // Pass ML Kit text only as a noisy hint; prefer AI items when present.
-      String? aiError;
+      // Fast path: local ML Kit when it already found solid items.
+      // AI vision is only for empty / low-confidence handwriting (slower).
+      const aiConfidenceThreshold = 0.72;
+      final needsAi = mlKitParsed.items.isEmpty ||
+          mlKitParsed.parseConfidence < aiConfidenceThreshold;
+
       ParsedReceipt parsed = mlKitParsed;
-      try {
-        final aiParsed = await _aiOcr.extractFromFile(
-          File(imagePath),
-          mlKitHint: raw.isEmpty ? null : raw,
-        );
-        if (aiParsed.items.isNotEmpty) {
-          parsed = aiParsed;
-        } else if (mlKitParsed.items.isEmpty && aiParsed.rawText.trim().isNotEmpty) {
-          parsed = aiParsed;
+      String? aiError;
+      if (needsAi) {
+        try {
+          final aiParsed = await _aiOcr.extractFromFile(
+            File(imagePath),
+            mlKitHint: raw.isEmpty ? null : raw,
+          );
+          if (aiParsed.items.isNotEmpty) {
+            parsed = aiParsed;
+          } else if (mlKitParsed.items.isEmpty &&
+              aiParsed.rawText.trim().isNotEmpty) {
+            parsed = aiParsed;
+          }
+        } catch (error) {
+          aiError = '$error';
         }
-      } catch (error) {
-        aiError = '$error';
       }
 
       if (parsed.items.isEmpty) {
@@ -1410,9 +1417,9 @@ class ReceiptScanner {
     final cropped = await ImageCropper().cropImage(
       sourcePath: sourcePath,
       compressFormat: ImageCompressFormat.jpg,
-      compressQuality: 92,
-      maxWidth: 2000,
-      maxHeight: 2000,
+      compressQuality: 78,
+      maxWidth: 1400,
+      maxHeight: 1400,
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Crop receipt',

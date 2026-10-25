@@ -6,19 +6,20 @@ import 'package:http/http.dart' as http;
 import '../api_config.dart';
 import '../receipt_scanner.dart';
 
-/// Gemini vision receipt OCR via the Boon Hua API (primary for handwriting).
+/// Cloud vision receipt OCR — used only when on-device parse is empty/low confidence.
 class ReceiptAiOcrService {
   Future<ParsedReceipt> extractFromFile(
     File imageFile, {
     String? mlKitHint,
   }) async {
-    final bytes = await imageFile.readAsBytes();
+    var bytes = await imageFile.readAsBytes();
     if (bytes.isEmpty) {
       throw Exception('Could not read the receipt photo.');
     }
-    if (bytes.length > 4 * 1024 * 1024) {
+    // Keep uploads small so AI OCR stays responsive on mobile networks.
+    if (bytes.length > 900 * 1024) {
       throw Exception(
-        'Photo is too large. Crop closer to the handwriting and try again.',
+        'Photo is too large for quick AI OCR. Crop tighter to the handwriting and try again.',
       );
     }
 
@@ -36,7 +37,7 @@ class ReceiptAiOcrService {
     };
     final hint = mlKitHint?.trim();
     if (hint != null && hint.isNotEmpty) {
-      body['mlKitHint'] = hint.length > 1200 ? hint.substring(0, 1200) : hint;
+      body['mlKitHint'] = hint.length > 500 ? hint.substring(0, 500) : hint;
     }
 
     final response = await http
@@ -45,7 +46,7 @@ class ReceiptAiOcrService {
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode(body),
         )
-        .timeout(const Duration(seconds: 75));
+        .timeout(const Duration(seconds: 35));
 
     if (response.statusCode == 404) {
       throw Exception(

@@ -169,11 +169,13 @@ def _extract_with_openai(
         )
 
     data_url = f"data:{mime};base64,{image_b64}"
+    # Prefer the fast mini vision model first; only one alternate if needed.
     models: list[str] = []
-    for name in ("gpt-4o-mini", OPENAI_MODEL, "gpt-4o"):
+    for name in ("gpt-4o-mini", OPENAI_MODEL):
         n = (name or "").strip()
         if n and n not in models:
             models.append(n)
+    models = models[:2]
 
     last_error: RuntimeError | None = None
     for model in models:
@@ -189,7 +191,8 @@ def _extract_with_openai(
                         {"type": "text", "text": user_text},
                         {
                             "type": "image_url",
-                            "image_url": {"url": data_url, "detail": "high"},
+                            # "low" is much faster / cheaper for receipt text.
+                            "image_url": {"url": data_url, "detail": "low"},
                         },
                     ],
                 },
@@ -205,7 +208,7 @@ def _extract_with_openai(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=70) as response:
+            with urllib.request.urlopen(request, timeout=40) as response:
                 data = json.loads(response.read().decode("utf-8"))
             choices = data.get("choices") or []
             if not choices:
@@ -284,12 +287,12 @@ def _extract_with_gemini(
             f"{model}:generateContent"
         )
         last_http: urllib.error.HTTPError | None = None
-        for attempt in range(3):
+        for attempt in range(2):
             request = urllib.request.Request(
                 url, data=payload, headers=headers, method="POST"
             )
             try:
-                with urllib.request.urlopen(request, timeout=55) as response:
+                with urllib.request.urlopen(request, timeout=35) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 candidates = data.get("candidates") or []
                 if not candidates:
