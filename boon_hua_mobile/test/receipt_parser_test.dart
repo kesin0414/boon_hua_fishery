@@ -230,6 +230,41 @@ RM35
     expect(result.items.first.totalPrice, 35);
   });
 
+  test('keeps two seafood rows with their own kg and RM on one OCR line', () {
+    final result = parser.parse('Octopus 1kg RM20 Stingray 500g RM9');
+    expect(result.items.length, 2);
+    final octopus = result.items.firstWhere(
+      (i) => i.species.toLowerCase().contains('octopus'),
+    );
+    final stingray = result.items.firstWhere(
+      (i) => i.species.toLowerCase().contains('sting'),
+    );
+    expect(octopus.quantityKg, 1);
+    expect(octopus.totalPrice, 20);
+    expect(stingray.quantityKg, 0.5);
+    expect(stingray.totalPrice, 9);
+  });
+
+  test('keeps two seafood rows when split across lines', () {
+    final result = parser.parse('''
+Octopus
+1kg
+RM20
+Stingray
+500g
+RM9
+''');
+    expect(result.items.length, 2);
+    expect(
+      result.items.firstWhere((i) => i.species.toLowerCase().contains('octopus')).totalPrice,
+      20,
+    );
+    expect(
+      result.items.firstWhere((i) => i.species.toLowerCase().contains('sting')).quantityKg,
+      0.5,
+    );
+  });
+
   test('confidence is higher when RM, unit, catalog and math agree', () {
     final strong = parser.parse('Crab 700g RM35');
     final weak = ReceiptParser.parsedReceiptFromAiJson({

@@ -190,9 +190,10 @@ class ReceiptParser {
     final groupedLines = _groupMultilineEntries(lines);
 
     for (final line in groupedLines) {
-      final item = _parseLine(line);
-      if (item == null) continue;
-      _addOrMergeDuplicateSpecies(items, item);
+      // One OCR line may contain two seafood rows — parse each window separately.
+      for (final item in _parseAllItemsInChunk(line)) {
+        _addOrMergeDuplicateSpecies(items, item);
+      }
     }
 
     if (items.isEmpty) {
@@ -202,9 +203,8 @@ class ReceiptParser {
       }
     }
 
-    // Fields not on one line: pair species / weight-unit / RM by keyword across the note.
-    // Only fill gaps — do not merge into already-parsed lines (avoids doubling kg).
-    final keywordItems = _parseKeywordScattered(normalizedText);
+    // Multi-row / out-of-order notes: one window per species so kg+RM stay on the right row.
+    final keywordItems = _parseItemsBySpeciesWindows(normalizedText);
     for (final item in keywordItems) {
       final key = item.species.trim().toLowerCase();
       final already = items.any((e) {
@@ -816,36 +816,119 @@ class ReceiptParser {
     );
   }
 
-  /// Pair seafood name + weight unit + RM when they are not written on one line.
-  List<ReceiptItem> _parseKeywordScattered(String text) {
+  /// Parse one or more seafood rows from a chunk (single line or grouped lines).
+  List<ReceiptItem> _parseAllItemsInChunk(String chunk) {
+    final windowed = _parseItemsBySpeciesWindows(chunk);
+    if (windowed.length >= 2) return windowed;
+
+    final single = _parseLine(chunk);
+    if (single != null) {
+      // Prefer windowed item when it matches the same species (better field binding).
+      if (windowed.length == 1 &&
+          windowed.first.species.toLowerCase().contains(
+                single.species.toLowerCase().split(' ').first,
+              )) {
+        return windowed;
+      }
+      return [single];
+    }
+    return windowed;
+  }
+
+  /// Pair each species with the kg + RM that fall in its text window (row),
+  /// so a 2-line note does not steal the other row's price/weight.
+  List<ReceiptItem> _parseItemsBySpeciesWindows(String text) {
     final cleaned = _stripAllDates(text);
     if (cleaned.trim().length < 4) return const [];
 
-    final weightMatches = RegExp(
-      '(\\d+(?:\\.\\d+)?)\\s*($_weightUnitPattern)\\b',
-      caseSensitive: false,
-    ).allMatches(cleaned).map((m) {
-      final rawQty = _parseNumber(m.group(1)) ?? 0;
-      final unit = m.group(2)!.toLowerCase();
-      final kg = (unit == 'g' || unit == 'gram' || unit == 'grams')
-          ? rawQty / 1000
-          : rawQty;
-      return (start: m.start, end: m.end, kg: kg);
-    }).where((w) => w.kg > 0).toList();
+    final speciesHits = _findSpeciesHits(cleaned);
+    if (speciesHits.isEmpty) return const [];
 
-    final priceMatches = RegExp(
-      r'RM\s*(\d+(?:\.\d{1,2})?)',
-      caseSensitive: false,
-    ).allMatches(cleaned).map((m) {
-      final amount = _parseNumber(m.group(1)) ?? 0;
-      return (start: m.start, end: m.end, amount: amount);
-    }).where((p) => p.amount > 0).toList();
+    speciesHits.sort((a, b) => a.start.compareTo(b.start));
 
-    if (weightMatches.isEmpty || priceMatches.isEmpty) return const [];
+    final items = <ReceiptItem>[];
+    for (var i = 0; i < speciesHits.length; i++) {
+      final species = speciesHits[i];
+      // Row window: after previous species name → before next species name.
+      final windowStart = i == 0 ? 0 : speciesHits[i - 1].end;
+      final windowEnd = i == speciesHits.length - 1
+          ? cleaned.length
+          : speciesHits[i + 1].start;
+      final rowWindow = cleaned.substring(
+        windowStart.clamp(0, cleaned.length),
+        windowEnd.clamp(0, cleaned.length),
+      );
+      // Prefer kg/RM after this species name so the previous row's figures are ignored.
+      final afterName = cleaned.substring(
+        species.start.clamp(0, cleaned.length),
+        windowEnd.clamp(0, cleaned.length),
+      );
 
+      final extracted = _extractWeightAndPrice(afterName, requireRm: true) ??
+          _extractWeightAndPrice(rowWindow, requireRm: true);
+      if (extracted == null) continue;
+
+      final evidence = afterName.trim().isNotEmpty ? afterName : rowWindow;
+      final ppk = extracted.unitPrice ??
+          _normalizer.calculatePricePerKg(
+            totalPrice: extracted.totalPrice,
+            quantityKg: extracted.quantityKg,
+          );
+      items.add(
+        ReceiptItem(
+          species: species.name,
+          quantityKg: extracted.quantityKg,
+          totalPrice: extracted.totalPrice,
+          pricePerKg: ppk,
+          confidence: _scoreItemConfidence(
+            species: species.name,
+            quantityKg: extracted.quantityKg,
+            totalPrice: extracted.totalPrice,
+            pricePerKg: ppk,
+            sourceText: evidence,
+            keywordScattered: true,
+          ),
+        ),
+      );
+    }
+
+    // Single unknown species with one weight + one RM in the whole note.
+    if (items.isEmpty && speciesHits.length == 1) {
+      final extracted = _extractWeightAndPrice(cleaned, requireRm: true);
+      if (extracted != null) {
+        final species = speciesHits.first.name;
+        final ppk = extracted.unitPrice ??
+            _normalizer.calculatePricePerKg(
+              totalPrice: extracted.totalPrice,
+              quantityKg: extracted.quantityKg,
+            );
+        items.add(
+          ReceiptItem(
+            species: species,
+            quantityKg: extracted.quantityKg,
+            totalPrice: extracted.totalPrice,
+            pricePerKg: ppk,
+            confidence: _scoreItemConfidence(
+              species: species,
+              quantityKg: extracted.quantityKg,
+              totalPrice: extracted.totalPrice,
+              pricePerKg: ppk,
+              sourceText: cleaned,
+              keywordScattered: true,
+            ),
+          ),
+        );
+      }
+    }
+
+    return items;
+  }
+
+  List<({int start, int end, String name})> _findSpeciesHits(String cleaned) {
     final speciesHits = <({int start, int end, String name})>[];
     final lower = cleaned.toLowerCase();
-    final hints = [..._seafoodHints]..sort((a, b) => b.length.compareTo(a.length));
+    final hints = [..._seafoodHints]
+      ..sort((a, b) => b.length.compareTo(a.length));
     final usedRanges = <(int, int)>[];
     for (final hint in hints) {
       if (hint.length < 3) continue;
@@ -856,7 +939,6 @@ class ReceiptParser {
         final end = idx + hint.length;
         final overlaps = usedRanges.any((r) => idx < r.$2 && end > r.$1);
         if (!overlaps) {
-          // Prefer catalog display casing from the matched span when possible.
           final rawName = cleaned.substring(idx, end).trim();
           speciesHits.add((
             start: idx,
@@ -869,108 +951,13 @@ class ReceiptParser {
       }
     }
 
-    // Fallback: leftover alpha tokens near a weight (unknown species).
     if (speciesHits.isEmpty) {
       final nameGuess = _extractSpeciesName(cleaned);
       if (nameGuess.isNotEmpty) {
-        speciesHits.add((start: 0, end: 0, name: nameGuess));
+        speciesHits.add((start: 0, end: nameGuess.length.clamp(0, cleaned.length), name: nameGuess));
       }
     }
-
-    if (speciesHits.isEmpty) return const [];
-
-    final items = <ReceiptItem>[];
-    final usedWeights = <int>{};
-    final usedPrices = <int>{};
-
-    for (final species in speciesHits) {
-      int? bestW;
-      var bestWDist = 1 << 30;
-      for (var i = 0; i < weightMatches.length; i++) {
-        if (usedWeights.contains(i)) continue;
-        final d = _keywordDistance(species.start, species.end, weightMatches[i].start, weightMatches[i].end);
-        if (d < bestWDist) {
-          bestWDist = d;
-          bestW = i;
-        }
-      }
-      int? bestP;
-      var bestPDist = 1 << 30;
-      for (var i = 0; i < priceMatches.length; i++) {
-        if (usedPrices.contains(i)) continue;
-        final d = _keywordDistance(species.start, species.end, priceMatches[i].start, priceMatches[i].end);
-        if (d < bestPDist) {
-          bestPDist = d;
-          bestP = i;
-        }
-      }
-      if (bestW == null || bestP == null) continue;
-      usedWeights.add(bestW);
-      usedPrices.add(bestP);
-
-      final qty = weightMatches[bestW].kg;
-      final total = priceMatches[bestP].amount;
-      final ppk = _normalizer.calculatePricePerKg(
-        totalPrice: total,
-        quantityKg: qty,
-      );
-      final snippet = cleaned;
-      items.add(
-        ReceiptItem(
-          species: species.name,
-          quantityKg: qty,
-          totalPrice: total,
-          pricePerKg: ppk,
-          confidence: _scoreItemConfidence(
-            species: species.name,
-            quantityKg: qty,
-            totalPrice: total,
-            pricePerKg: ppk,
-            sourceText: snippet,
-            keywordScattered: true,
-          ),
-        ),
-      );
-    }
-
-    // One weight + one RM with no catalog hit already handled via nameGuess.
-    if (items.isEmpty &&
-        weightMatches.length == 1 &&
-        priceMatches.length == 1 &&
-        speciesHits.isNotEmpty) {
-      final qty = weightMatches.first.kg;
-      final total = priceMatches.first.amount;
-      final species = speciesHits.first.name;
-      final ppk = _normalizer.calculatePricePerKg(
-        totalPrice: total,
-        quantityKg: qty,
-      );
-      items.add(
-        ReceiptItem(
-          species: species,
-          quantityKg: qty,
-          totalPrice: total,
-          pricePerKg: ppk,
-          confidence: _scoreItemConfidence(
-            species: species,
-            quantityKg: qty,
-            totalPrice: total,
-            pricePerKg: ppk,
-            sourceText: cleaned,
-            keywordScattered: true,
-          ),
-        ),
-      );
-    }
-
-    return items;
-  }
-
-  int _keywordDistance(int aStart, int aEnd, int bStart, int bEnd) {
-    if (aEnd == 0 && aStart == 0) return 0;
-    if (aEnd < bStart) return bStart - aEnd;
-    if (bEnd < aStart) return aStart - bEnd;
-    return 0;
+    return speciesHits;
   }
 
   String _titleCaseSpecies(String raw) {
