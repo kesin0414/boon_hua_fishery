@@ -63,33 +63,49 @@ class _SeafoodIdentifyScreenState extends State<SeafoodIdentifyScreen> {
   }
 
   Future<File?> _cropPhoto(String sourcePath) async {
-    final cropped = await ImageCropper().cropImage(
-      sourcePath: sourcePath,
-      compressFormat: ImageCompressFormat.jpg,
-      compressQuality: 88,
-      maxWidth: 1600,
-      maxHeight: 1600,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: 'Crop seafood',
-          toolbarColor: AppColors.navy,
-          toolbarWidgetColor: Colors.white,
-          statusBarColor: AppColors.navy,
-          activeControlsWidgetColor: AppColors.teal,
-          initAspectRatio: CropAspectRatioPreset.original,
-          lockAspectRatio: false,
-          hideBottomControls: false,
-        ),
-        IOSUiSettings(
-          title: 'Crop seafood',
-          doneButtonTitle: 'Use',
-          cancelButtonTitle: 'Cancel',
-          aspectRatioLockEnabled: false,
-        ),
-      ],
-    );
-    if (cropped == null) return null;
-    return File(cropped.path);
+    try {
+      // Avoid racing the camera activity teardown on Android.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final cropped = await ImageCropper().cropImage(
+        sourcePath: sourcePath,
+        compressFormat: ImageCompressFormat.jpg,
+        compressQuality: 88,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: 'Crop seafood',
+            toolbarColor: AppColors.navy,
+            toolbarWidgetColor: Colors.white,
+            activeControlsWidgetColor: AppColors.teal,
+            initAspectRatio: CropAspectRatioPreset.original,
+            lockAspectRatio: false,
+            hideBottomControls: false,
+            aspectRatioPresets: const [
+              CropAspectRatioPreset.original,
+              CropAspectRatioPreset.ratio4x3,
+              CropAspectRatioPreset.square,
+            ],
+          ),
+          IOSUiSettings(
+            title: 'Crop seafood',
+            doneButtonTitle: 'Use',
+            cancelButtonTitle: 'Cancel',
+            aspectRatioLockEnabled: false,
+            aspectRatioPresets: const [
+              CropAspectRatioPreset.original,
+              CropAspectRatioPreset.ratio4x3,
+              CropAspectRatioPreset.square,
+            ],
+          ),
+        ],
+      );
+      if (cropped == null) return null;
+      return File(cropped.path);
+    } catch (_) {
+      // Fall back to the uncropped capture if the crop UI fails.
+      return File(sourcePath);
+    }
   }
 
   Future<void> _recrop() async {

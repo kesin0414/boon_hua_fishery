@@ -119,6 +119,16 @@ class SeafoodIdentifyRequest(BaseModel):
     mimeType: str = Field(default="image/jpeg", examples=["image/jpeg"])
 
 
+class ReceiptOcrRequest(BaseModel):
+    imageBase64: str = Field(..., min_length=50, description="JPEG/PNG/WebP as base64")
+    mimeType: str = Field(default="image/jpeg", examples=["image/jpeg"])
+    mlKitHint: Optional[str] = Field(
+        default=None,
+        description="Optional noisy on-device OCR text to help correct handwriting",
+        max_length=2000,
+    )
+
+
 # --- API ROUTES ---
 
 def _ai_status_payload() -> dict:
@@ -149,6 +159,7 @@ def read_root():
         "aiStatus": "/recipes/ai-status",
         "salesForecast": "/sales/forecast",
         "seafoodIdentify": "/seafood/identify",
+        "receiptOcr": "/receipt/ocr",
         "docs": "/docs",
         "health": "/health",
     }
@@ -279,6 +290,29 @@ def seafood_identify(request: SeafoodIdentifyRequest):
         return identify_seafood_from_image(
             image_base64=request.imageBase64,
             mime_type=request.mimeType,
+        )
+    except RuntimeError as e:
+        detail = str(e)
+        if _rate_limited_error_message(detail):
+            raise HTTPException(
+                status_code=429,
+                detail="AI is busy right now. Please try again in a minute.",
+            )
+        raise HTTPException(status_code=503, detail=detail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/receipt/ocr")
+def receipt_ocr(request: ReceiptOcrRequest):
+    """Read handwritten / printed seafood receipt photos via Gemini vision."""
+    try:
+        from receipt_ocr_service import extract_receipt_from_image
+
+        return extract_receipt_from_image(
+            image_base64=request.imageBase64,
+            mime_type=request.mimeType,
+            ml_kit_hint=request.mlKitHint,
         )
     except RuntimeError as e:
         detail = str(e)

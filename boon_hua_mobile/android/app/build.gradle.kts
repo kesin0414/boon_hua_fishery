@@ -45,4 +45,6 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // Required by image_cropper (UCropActivity theme).
+    implementation("androidx.appcompat:appcompat:1.7.0")
 }

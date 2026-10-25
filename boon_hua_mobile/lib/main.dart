@@ -904,10 +904,6 @@ class _ConsumerShellState extends State<ConsumerShell> {
     );
   }
 
-  Future<void> _deleteFreezerItem(FreezerItem item) async {
-    await _repository.deleteFreezerItem(item);
-  }
-
   Future<void> _markFreezerLoss(
     FreezerItem item,
     String reason,
@@ -963,7 +959,6 @@ class _ConsumerShellState extends State<ConsumerShell> {
         marketInventory: _marketInventory,
         onAddItem: _addManualFreezerItem,
         onUpdateItem: _updateFreezerItem,
-        onDeleteItem: _deleteFreezerItem,
         onMarkLoss: _markFreezerLoss,
       ),
       ScanScreen(
@@ -1494,7 +1489,6 @@ class FreezerScreen extends StatefulWidget {
     required this.marketInventory,
     required this.onAddItem,
     required this.onUpdateItem,
-    required this.onDeleteItem,
     required this.onMarkLoss,
   });
 
@@ -1504,7 +1498,6 @@ class FreezerScreen extends StatefulWidget {
   final List<MarketInventoryItem> marketInventory;
   final ValueChanged<FreezerItem> onAddItem;
   final ValueChanged<FreezerItem> onUpdateItem;
-  final ValueChanged<FreezerItem> onDeleteItem;
   final void Function(FreezerItem item, String reason, String note) onMarkLoss;
 
   @override
@@ -1560,74 +1553,15 @@ class _FreezerScreenState extends State<FreezerScreen> {
   }
 
   Future<void> _confirmMarkLoss(FreezerItem item) async {
-    var reason = item.daysRemaining < 0 ? 'expired' : 'spoiled';
-    final noteController = TextEditingController();
-    final result = await showDialog<bool>(
+    final result = await showDialog<_LossDialogResult>(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            return AlertDialog(
-              title: Text('Record loss — ${item.species}'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text(
-                    'What happened to this item?',
-                    style: TextStyle(fontSize: 13, color: AppColors.muted),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    value: reason,
-                    decoration: const InputDecoration(
-                      labelText: 'Reason',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: 'spoiled', child: Text('Spoiled')),
-                      DropdownMenuItem(value: 'expired', child: Text('Expired')),
-                      DropdownMenuItem(value: 'wastage', child: Text('Wastage / damaged')),
-                      DropdownMenuItem(value: 'consumed', child: Text('Used / cooked')),
-                    ],
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setDialogState(() => reason = v);
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: noteController,
-                    decoration: const InputDecoration(
-                      labelText: 'Note (optional)',
-                      border: OutlineInputBorder(),
-                    ),
-                    maxLines: 2,
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Save'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+      builder: (ctx) => _RecordLossDialog(
+        species: item.species,
+        initialReason: item.daysRemaining < 0 ? 'expired' : 'spoiled',
+      ),
     );
-    if (result != true) {
-      noteController.dispose();
-      return;
-    }
-    final note = noteController.text.trim();
-    noteController.dispose();
-    widget.onMarkLoss(item, reason, note);
+    if (result == null || !mounted) return;
+    widget.onMarkLoss(item, result.reason, result.note);
   }
 
   @override
@@ -1708,7 +1642,6 @@ class _FreezerScreenState extends State<FreezerScreen> {
                 FreezerTile(
                   item: item,
                   onEdit: () => _openAddItemSheet(context, existingItem: item),
-                  onDelete: () => widget.onDeleteItem(item),
                   onMarkLoss: () => _confirmMarkLoss(item),
                 ),
           ] else if (widget.lossHistory.isEmpty)
@@ -1716,7 +1649,7 @@ class _FreezerScreenState extends State<FreezerScreen> {
               icon: Icons.history,
               title: 'No loss records yet',
               message:
-                  'When seafood spoils, expires, or is used up, mark it from an active item to keep a history here.',
+                  'Tap the orange report icon on an active item to record spoilage, expiry, or use — it appears here.',
             )
           else
             ...widget.lossHistory.map(
@@ -1756,6 +1689,112 @@ class _FreezerScreenState extends State<FreezerScreen> {
         marketInventory: widget.marketInventory,
         onSave: existingItem == null ? widget.onAddItem : widget.onUpdateItem,
       ),
+    );
+  }
+}
+
+class _LossDialogResult {
+  const _LossDialogResult({required this.reason, required this.note});
+
+  final String reason;
+  final String note;
+}
+
+/// Owns the note [TextEditingController] so it is disposed only after the
+/// dialog route (and TextField listeners) are fully torn down — avoids
+/// `_dependents.isEmpty` assertion when confirming loss.
+class _RecordLossDialog extends StatefulWidget {
+  const _RecordLossDialog({
+    required this.species,
+    required this.initialReason,
+  });
+
+  final String species;
+  final String initialReason;
+
+  @override
+  State<_RecordLossDialog> createState() => _RecordLossDialogState();
+}
+
+class _RecordLossDialogState extends State<_RecordLossDialog> {
+  late String _reason = widget.initialReason;
+  final _noteController = TextEditingController();
+
+  @override
+  void dispose() {
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Record loss — ${widget.species}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'What happened to this item?',
+            style: TextStyle(fontSize: 13, color: AppColors.muted),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            key: ValueKey(_reason),
+            initialValue: _reason,
+            decoration: const InputDecoration(
+              labelText: 'Reason',
+              border: OutlineInputBorder(),
+            ),
+            items: const [
+              DropdownMenuItem(value: 'spoiled', child: Text('Spoiled')),
+              DropdownMenuItem(value: 'expired', child: Text('Expired')),
+              DropdownMenuItem(
+                value: 'wastage',
+                child: Text('Wastage / damaged'),
+              ),
+              DropdownMenuItem(
+                value: 'consumed',
+                child: Text('Used / cooked'),
+              ),
+            ],
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => _reason = v);
+            },
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _noteController,
+            decoration: const InputDecoration(
+              labelText: 'Note (optional)',
+              border: OutlineInputBorder(),
+            ),
+            maxLines: 2,
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFFFF7A1A),
+          ),
+          onPressed: () {
+            Navigator.pop(
+              context,
+              _LossDialogResult(
+                reason: _reason,
+                note: _noteController.text.trim(),
+              ),
+            );
+          },
+          child: const Text('Remove & log loss'),
+        ),
+      ],
     );
   }
 }
@@ -4447,13 +4486,11 @@ class FreezerTile extends StatelessWidget {
     super.key,
     required this.item,
     required this.onEdit,
-    required this.onDelete,
     required this.onMarkLoss,
   });
 
   final FreezerItem item;
   final VoidCallback onEdit;
-  final VoidCallback onDelete;
   final VoidCallback onMarkLoss;
 
   @override
@@ -4553,26 +4590,19 @@ class FreezerTile extends StatelessWidget {
             children: [
               IconButton(
                 onPressed: onMarkLoss,
-                tooltip: 'Record spoilage or use',
+                tooltip: 'Record spoilage / loss',
                 icon: Icon(
                   Icons.report_outlined,
                   color: expired ? AppColors.danger : const Color(0xFFFF7A1A),
-                  size: 20,
+                  size: 22,
                 ),
               ),
               IconButton(
                 onPressed: onEdit,
+                tooltip: 'Edit item',
                 icon: const Icon(
                   Icons.edit_outlined,
                   color: Color(0xFF9AA4B2),
-                  size: 20,
-                ),
-              ),
-              IconButton(
-                onPressed: onDelete,
-                icon: const Icon(
-                  Icons.delete_outline,
-                  color: Color(0xFFC4CBD6),
                   size: 20,
                 ),
               ),
@@ -5169,8 +5199,14 @@ class _EditableReceiptRow {
 
 class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
   final _normalizer = const PriceNormalizer();
-  late final List<_EditableReceiptRow> _rows;
+  late List<_EditableReceiptRow> _rows;
   int _focusedIndex = 0;
+
+  _EditableReceiptRow _blankRow() => _EditableReceiptRow(
+        speciesController: TextEditingController(),
+        weightController: TextEditingController(),
+        totalController: TextEditingController(),
+      );
 
   @override
   void initState() {
@@ -5180,14 +5216,7 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
       widget.receipt.items.isEmpty ? 0 : widget.receipt.items.length - 1,
     );
     if (widget.receipt.items.isEmpty) {
-      _rows = List.generate(
-        2,
-        (_) => _EditableReceiptRow(
-          speciesController: TextEditingController(),
-          weightController: TextEditingController(),
-          totalController: TextEditingController(),
-        ),
-      );
+      _rows = [_blankRow(), _blankRow()];
     } else {
       _rows = widget.receipt.items
           .map(
@@ -5203,6 +5232,34 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
           )
           .toList();
     }
+  }
+
+  void _addItemRow() {
+    setState(() {
+      _rows.add(_blankRow());
+      _focusedIndex = _rows.length - 1;
+    });
+  }
+
+  void _removeItemRow(int index) {
+    if (_rows.length <= 1) {
+      // Keep one blank row so the user can still type.
+      setState(() {
+        _rows[0].speciesController.clear();
+        _rows[0].weightController.clear();
+        _rows[0].totalController.clear();
+        _focusedIndex = 0;
+      });
+      return;
+    }
+    setState(() {
+      _rows.removeAt(index).dispose();
+      if (_focusedIndex >= _rows.length) {
+        _focusedIndex = _rows.length - 1;
+      } else if (_focusedIndex > index) {
+        _focusedIndex -= 1;
+      }
+    });
   }
 
   @override
@@ -5312,13 +5369,13 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
               ),
               const SizedBox(height: 10),
               const Text(
-                'Handwriting may not parse perfectly. Fill in the fields below from your note.',
+                'Handwriting may not parse perfectly. Fill in the fields below, or tap Add item for missed lines.',
                 style: TextStyle(color: AppColors.muted, fontSize: 11),
               ),
               const SizedBox(height: 6),
             ] else ...[
               const Text(
-                'Edit each line before saving. Tap a row to use it in Compare.',
+                'Edit each line before saving. Use Add item if OCR missed anything.',
                 style: TextStyle(color: AppColors.muted, fontSize: 11),
               ),
               const SizedBox(height: 6),
@@ -5337,6 +5394,17 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
             ],
             for (var i = 0; i < _rows.length; i++)
               _buildEditableRow(i),
+            const SizedBox(height: 4),
+            OutlinedButton.icon(
+              onPressed: _addItemRow,
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('Add item'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.navy,
+                side: const BorderSide(color: AppColors.line),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
             const SizedBox(height: 12),
             Row(
               children: [
@@ -5408,6 +5476,16 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
                   const SizedBox(width: 6),
                   const Icon(Icons.check_circle, size: 14, color: AppColors.teal),
                 ],
+                const Spacer(),
+                IconButton(
+                  onPressed: () => _removeItemRow(index),
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                  color: AppColors.muted,
+                  tooltip: 'Remove item',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                ),
               ],
             ),
             const SizedBox(height: 8),
