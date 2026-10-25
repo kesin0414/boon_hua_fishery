@@ -15,9 +15,11 @@ from datetime import date, datetime
 from typing import Any
 
 from ai_recipe_service import (
+    OPENAI_MODEL,
     _gemini_error_message,
     _valid_gemini_key,
     ai_provider_name,
+    ai_recipes_enabled,
 )
 from seafood_identify_service import _models_to_try
 
@@ -77,23 +79,159 @@ def extract_receipt_from_image(
     if mime == "image/jpg":
         mime = "image/jpeg"
 
-    gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    if not _valid_gemini_key(gemini_key):
+    if not ai_recipes_enabled():
         raise RuntimeError(
-            "GEMINI_API_KEY is not set on the server. "
-            "Handwritten receipt AI OCR needs Gemini."
+            "AI is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY on the server "
+            "for handwritten receipt OCR."
         )
 
     hint = (ml_kit_hint or "").strip()
-    parsed = _extract_with_gemini(
-        image_b64=raw,
-        mime=mime,
-        api_key=gemini_key,
-        ml_kit_hint=hint,
+    choice = os.getenv("AI_PROVIDER", "auto").strip().lower()
+    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    gemini_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+
+    errors: list[str] = []
+
+    def try_gemini() -> dict[str, Any]:
+        if not gemini_key or not _valid_gemini_key(gemini_key):
+            raise RuntimeError("GEMINI_API_KEY not set or invalid")
+        return _extract_with_gemini(
+            image_b64=raw,
+            mime=mime,
+            api_key=gemini_key,
+            ml_kit_hint=hint,
+        )
+
+    def try_openai() -> dict[str, Any]:
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        return _extract_with_openai(
+            image_b64=raw,
+            mime=mime,
+            api_key=openai_key,
+            ml_kit_hint=hint,
+        )
+
+    # Prefer Gemini when available (cheaper); honor AI_PROVIDER override.
+    ordered: list[tuple[str, Any]] = []
+    if choice == "openai":
+        if openai_key:
+            ordered.append(("openai", try_openai))
+        if gemini_key:
+            ordered.append(("gemini", try_gemini))
+    elif choice == "gemini":
+        if gemini_key:
+            ordered.append(("gemini", try_gemini))
+        if openai_key:
+            ordered.append(("openai", try_openai))
+    else:
+        if gemini_key and _valid_gemini_key(gemini_key):
+            ordered.append(("gemini", try_gemini))
+        if openai_key:
+            ordered.append(("openai", try_openai))
+
+    if not ordered:
+        raise RuntimeError(
+            "No usable AI key for receipt OCR. Set GEMINI_API_KEY or OPENAI_API_KEY."
+        )
+
+    for name, runner in ordered:
+        try:
+            parsed = runner()
+            parsed["provider"] = name
+            parsed["aiProvider"] = ai_provider_name()
+            return parsed
+        except Exception as exc:
+            print(f"WARN: receipt OCR via {name} failed: {exc}")
+            errors.append(f"{name}: {exc}")
+
+    raise RuntimeError("; ".join(errors) if errors else "Receipt OCR request failed")
+
+
+def _extract_with_openai(
+    *,
+    image_b64: str,
+    mime: str,
+    api_key: str,
+    ml_kit_hint: str = "",
+) -> dict[str, Any]:
+    user_text = (
+        "Read this seafood purchase note / receipt photo carefully, even if the "
+        "handwriting is messy or faint. "
+        "Extract purchase date, each seafood item, weight (as kg), and RM price. "
+        "Return JSON only."
     )
-    parsed["provider"] = "gemini"
-    parsed["aiProvider"] = ai_provider_name()
-    return parsed
+    if ml_kit_hint:
+        clipped = ml_kit_hint[:1200]
+        user_text += (
+            "\n\nNoisy on-device OCR hint (may be wrong — trust the image more):\n"
+            f"{clipped}"
+        )
+
+    data_url = f"data:{mime};base64,{image_b64}"
+    models: list[str] = []
+    for name in ("gpt-4o-mini", OPENAI_MODEL, "gpt-4o"):
+        n = (name or "").strip()
+        if n and n not in models:
+            models.append(n)
+
+    last_error: RuntimeError | None = None
+    for model in models:
+        body = {
+            "model": model,
+            "temperature": 0.05,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": _system_prompt()},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                    ],
+                },
+            ],
+        }
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=70) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("OpenAI returned no choices")
+            text = choices[0].get("message", {}).get("content") or ""
+            return _normalize_receipt_result(text)
+        except urllib.error.HTTPError as exc:
+            body_text = ""
+            try:
+                body_text = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            snippet = (body_text or str(exc.reason))[:220]
+            last_error = RuntimeError(f"OpenAI HTTP {exc.code}: {snippet}")
+            if exc.code in (400, 404):
+                continue
+            if exc.code == 429:
+                raise RuntimeError(
+                    "AI is temporarily rate-limited or out of quota for this OpenAI key. "
+                    "Add GEMINI_API_KEY on Render for handwritten receipt OCR."
+                ) from exc
+            raise last_error from exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("OpenAI receipt OCR failed")
 
 
 def _extract_with_gemini(
