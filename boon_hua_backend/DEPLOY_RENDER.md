@@ -227,7 +227,7 @@ After redeploy, `GET /` should also include `"salesForecast": "/sales/forecast"`
 
 ### Admin dashboard
 
-Record sales under **Sales** for at least **3 different days** with RM totals. Open **Overview** — the prediction card should show **Gradient boosting (scikit-learn)**, not **offline fallback**.
+Record sales under **Sales** for at least **3 different days** with RM totals. Open **Overview** — the prediction card footer should show **Method: Gradient Boosting Regressor (scikit-learn)**, not the local fallback message.
 
 ## 8. Admin web app
 
@@ -240,3 +240,29 @@ Record sales under **Sales** for at least **3 different days** with RM totals. O
 This URL is used for **recipes** and **sales forecast** (same `app_config/public` field).
 
 This is **not** your React admin website URL and **not** TheMealDB.
+
+## 9. Monthly report exports (CSV / Excel / PDF)
+
+The admin **Monthly Report** page exports from the browser (no extra Render service):
+
+| Format | How |
+|--------|-----|
+| **CSV** | JasperReports template `reports/sales_report.jrxml` via backend API |
+| **Excel (.xlsx)** | Same Jasper template, `outputFormat=xlsx` |
+| **PDF** | Same Jasper template, `outputFormat=pdf` |
+
+Choose **From / To** dates, then click **CSV (Jasper)**, **Excel (Jasper)**, or **PDF (Jasper)**. The web app calls `POST /reports/sales/export` on the FastAPI backend.
+
+### Jaspersoft / JasperReports setup
+
+Reports use **JasperReports (Jaspersoft)** `.jrxml` templates in `boon_hua_backend/reports/`.
+
+**Local / thesis demo (JasperStarter):**
+
+1. Install Java 17+.
+2. Download [JasperStarter](https://github.com/cenote/jasperstarter/releases) → `boon_hua_backend/tools/jasperstarter.jar`.
+3. Restart the backend. See `tools/JASPER_SETUP.md`.
+
+**Production (JasperReports Server):** set `JASPER_SERVER_URL`, `JASPER_REPORT_URI`, and credentials on the backend (see `jasper_report_service.py`).
+
+Render’s default Python runtime does **not** include Java — use JasperReports Server in the cloud, or run the API on a host with Java for JasperStarter.

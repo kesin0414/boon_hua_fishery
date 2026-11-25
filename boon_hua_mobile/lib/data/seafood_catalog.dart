@@ -294,4 +294,139 @@ class SeafoodCatalog {
     if (filter == allCategoriesFilter) return true;
     return itemCategory == filter;
   }
+
+  /// Letters-only key for fuzzy spelling compares (sqlmon / salm0n → sqlmon/salmn).
+  static String lettersKey(String value) =>
+      value.toLowerCase().replaceAll(RegExp(r'[^a-z]'), '');
+
+  static const _genericKeywords = {
+    'ikan',
+    'fish',
+    'prawn',
+    'shrimp',
+    'udang',
+    'crab',
+    'ketam',
+    'clam',
+    'squid',
+    'sotong',
+    'frozen',
+    'fillet',
+    'live',
+    'shellfish',
+    'baby',
+    'giant',
+    'local',
+  };
+
+  /// OCR / handwriting near-miss → short catalog label (sqlmon→Salmon).
+  /// Returns [input] unchanged when nothing is close enough or the match is ambiguous.
+  static String correctNearMissSpecies(String input) {
+    final formatted = formatSpeciesLabel(input);
+    if (formatted.length < 3) return formatted;
+
+    final exact = findByName(formatted);
+    if (exact != null) return exact.name;
+
+    final key = lettersKey(formatted);
+    if (key.length < 4) return formatted;
+
+    // Exact alias / keyword (letters). Bare generics stay short labels
+    // ("ikan"→Ikan, not Tilapia); distinctive words become the catalog alias.
+    for (final entry in all) {
+      for (final alias in _aliasesFor(entry)) {
+        if (lettersKey(alias) != key) continue;
+        if (_genericKeywords.contains(key)) {
+          return _titleCaseAlias(key);
+        }
+        return _titleCaseAlias(alias);
+      }
+    }
+
+    var bestDist = 99;
+    final hits = <String, String>{}; // lettersKey → display label
+
+    for (final entry in all) {
+      for (final alias in _aliasesFor(entry)) {
+        final c = lettersKey(alias);
+        if (c.length < 4) continue;
+        if (_genericKeywords.contains(c) && key.length <= c.length + 1) {
+          continue;
+        }
+        if ((c.length - key.length).abs() > 2) continue;
+        final dist = _editDistance(key, c);
+        final allowed = c.length <= 5 ? 1 : (c.length <= 9 ? 2 : 3);
+        if (dist <= 0 || dist > allowed) continue;
+
+        final label = _titleCaseAlias(alias);
+        final preferCompact = !alias.contains(' ');
+        if (dist < bestDist) {
+          bestDist = dist;
+          hits
+            ..clear()
+            ..[c] = label;
+        } else if (dist == bestDist) {
+          final existing = hits[c];
+          if (existing == null) {
+            hits[c] = label;
+          } else if (preferCompact && existing.contains(' ')) {
+            hits[c] = label;
+          }
+        }
+      }
+    }
+
+    if (hits.isEmpty) return formatted;
+    // Different letter-keys at the same distance → ambiguous.
+    if (hits.length > 1) return formatted;
+    return hits.values.first;
+  }
+
+  static Iterable<String> _aliasesFor(SeafoodCatalogEntry entry) sync* {
+    for (final keyword in entry.keywords) {
+      final k = keyword.trim().toLowerCase();
+      if (k.length >= 4) yield k;
+    }
+    final core = entry.name.split('(').first.trim();
+    if (core.isNotEmpty) yield core.toLowerCase();
+    // "Crab / Ketam" → crab, ketam
+    for (final part in core.split(RegExp(r'[/]'))) {
+      final p = part.trim().toLowerCase();
+      if (p.length >= 4) yield p;
+    }
+    for (final part in core.split(RegExp(r'[\s/]+'))) {
+      final p = part.trim().toLowerCase();
+      if (p.length >= 5 && !_genericKeywords.contains(p)) yield p;
+    }
+  }
+
+  static String _titleCaseAlias(String alias) {
+    return alias
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .map((p) => p[0].toUpperCase() + p.substring(1).toLowerCase())
+        .join(' ');
+  }
+
+  static int _editDistance(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+    final prev = List<int>.generate(b.length + 1, (i) => i);
+    for (var i = 1; i <= a.length; i++) {
+      var diag = prev[0];
+      prev[0] = i;
+      for (var j = 1; j <= b.length; j++) {
+        final temp = prev[j];
+        final cost = a[i - 1] == b[j - 1] ? 0 : 1;
+        prev[j] = [
+          prev[j] + 1,
+          prev[j - 1] + 1,
+          diag + cost,
+        ].reduce((x, y) => x < y ? x : y);
+        diag = temp;
+      }
+    }
+    return prev[b.length];
+  }
 }

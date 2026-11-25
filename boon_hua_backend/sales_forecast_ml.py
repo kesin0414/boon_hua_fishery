@@ -13,8 +13,11 @@ from sklearn.ensemble import GradientBoostingRegressor
 
 FORECAST_DAYS = 7
 MIN_SALE_DAYS = 3
-MIN_TRAIN_ROWS = 18
+# Need enough rows after warm-up index to fit GradientBoostingRegressor.
+MIN_TRAIN_ROWS = 10
 LAG_DAYS = (1, 2, 3, 7, 14)
+# Start features after 7 days (lag-14 safely falls back to series[0] when missing).
+TRAIN_START_IDX = 7
 
 
 def _parse_date(key: str) -> date:
@@ -78,7 +81,7 @@ def _holdout_quality(series: np.ndarray, keys: List[str]) -> Tuple[Optional[floa
         return None, "low"
 
     X_train, y_train = [], []
-    for idx in range(max(LAG_DAYS), train_end):
+    for idx in range(TRAIN_START_IDX, train_end):
         d = _parse_date(keys[idx])
         X_train.append(_build_row(series, idx, d.weekday(), d.month))
         y_train.append(series[idx])
@@ -148,7 +151,7 @@ def forecast_sales_ml(daily: Sequence[dict]) -> dict:
     _, holdout_level = _holdout_quality(series, keys)
 
     X_all, y_all = [], []
-    for idx in range(max(LAG_DAYS), n):
+    for idx in range(TRAIN_START_IDX, n):
         d = _parse_date(keys[idx])
         X_all.append(_build_row(series, idx, d.weekday(), d.month))
         y_all.append(series[idx])
@@ -209,7 +212,7 @@ def forecast_sales_ml(daily: Sequence[dict]) -> dict:
         "next7Forecast": next7,
         "chartSeries": last7_actual + next7,
         "hasEnoughData": True,
-        "modelName": "Smart sales estimate",
+        "modelName": "Gradient Boosting Regressor (scikit-learn)",
         "source": "ml",
     }
 
@@ -265,7 +268,7 @@ def _baseline_forecast(keys: List[str], series: np.ndarray, days_with_sales: int
         "next7Forecast": next7,
         "chartSeries": last7_actual + next7,
         "hasEnoughData": days_with_sales >= MIN_SALE_DAYS,
-        "modelName": "Early sales estimate",
+        "modelName": "Weighted moving average (waiting for more history before scikit-learn)",
         "source": "ml-baseline",
     }
 
@@ -294,6 +297,6 @@ def _empty_result(message: str) -> dict:
         "next7Forecast": [],
         "chartSeries": last7_actual,
         "hasEnoughData": False,
-        "modelName": "Smart sales estimate",
+        "modelName": "Gradient Boosting Regressor (scikit-learn)",
         "source": "ml",
     }

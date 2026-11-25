@@ -7,14 +7,16 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --import ./scripts/register-test-loader.mjs --test src/shopPhoneFlow.test.js"
   },
   "dependencies": {
     "firebase": "^12.12.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-router-dom": "^7.15.0",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@babel/core": "^7.29.0",

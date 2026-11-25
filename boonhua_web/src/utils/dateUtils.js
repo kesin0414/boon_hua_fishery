@@ -1,4 +1,5 @@
 export const OVERVIEW_DATE_RANGE_KEY = 'boonhua_overview_date_range';
+export const REPORT_DATE_RANGE_KEY = 'boonhua_report_date_range';
 
 export class DateUtils {
   static formatLocalDate(date) {
@@ -39,6 +40,36 @@ export class DateUtils {
     };
   }
 
+  static getCurrentMonthRange() {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    return {
+      from: DateUtils.formatLocalDate(start),
+      to: DateUtils.formatLocalDate(end),
+    };
+  }
+
+  static loadStoredReportDateRange() {
+    try {
+      const raw = localStorage.getItem(REPORT_DATE_RANGE_KEY);
+      if (!raw) return null;
+      const { dateFrom, dateTo } = JSON.parse(raw);
+      if (dateFrom && dateTo) return { dateFrom, dateTo };
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  static saveStoredReportDateRange(dateFrom, dateTo) {
+    try {
+      localStorage.setItem(REPORT_DATE_RANGE_KEY, JSON.stringify({ dateFrom, dateTo }));
+    } catch {
+      /* ignore */
+    }
+  }
+
   static loadStoredDateRange() {
     try {
       const raw = localStorage.getItem(OVERVIEW_DATE_RANGE_KEY);
@@ -65,5 +96,8 @@ export const formatLocalDate = DateUtils.formatLocalDate.bind(DateUtils);
 export const parseLocalDate = DateUtils.parseLocalDate.bind(DateUtils);
 export const eachDayInRange = DateUtils.eachDayInRange.bind(DateUtils);
 export const getLast7DaysRange = DateUtils.getLast7DaysRange.bind(DateUtils);
+export const getCurrentMonthRange = DateUtils.getCurrentMonthRange.bind(DateUtils);
 export const loadStoredDateRange = DateUtils.loadStoredDateRange.bind(DateUtils);
 export const saveStoredDateRange = DateUtils.saveStoredDateRange.bind(DateUtils);
+export const loadStoredReportDateRange = DateUtils.loadStoredReportDateRange.bind(DateUtils);
+export const saveStoredReportDateRange = DateUtils.saveStoredReportDateRange.bind(DateUtils);

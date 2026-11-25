@@ -19,7 +19,7 @@ export const PAGE_META = {
   },
   '/reports': {
     title: 'Monthly Reports',
-    subtitle: 'Sales and collection report by month — who paid and who still owes (print / PDF).',
+    subtitle: 'Sales and collection report by date range — export CSV, Excel, or PDF.',
   },
   '/users': {
     title: 'Customer Accounts',
@@ -67,7 +67,7 @@ export function StatCard({ label, value, hint, tone = 'blue' }) {
   );
 }
 
-export function AlertBanner({ variant = 'info', title, children }) {
+export function AlertBanner({ variant = 'info', title, children, onDismiss, onMarkRead }) {
   const styles = {
     info: 'bg-blue-50 border-blue-200 text-blue-900',
     warning: 'bg-amber-50 border-amber-200 text-amber-900',
@@ -76,8 +76,39 @@ export function AlertBanner({ variant = 'info', title, children }) {
   };
   return (
     <div className={`rounded-xl border px-4 py-3 mb-6 ${styles[variant] || styles.info}`}>
-      {title && <p className="font-bold text-sm">{title}</p>}
-      {children && <div className={`text-sm mt-1 ${title ? 'opacity-90' : ''}`}>{children}</div>}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          {title && <p className="font-bold text-sm">{title}</p>}
+          {children && (
+            <div className={`text-sm mt-1 ${title ? 'opacity-90' : ''}`}>{children}</div>
+          )}
+        </div>
+        {(onDismiss || onMarkRead) && (
+          <div className="flex shrink-0 items-center gap-1 no-print">
+            {onMarkRead && (
+              <button
+                type="button"
+                onClick={onMarkRead}
+                className="text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-lg hover:bg-black/5"
+                title="Mark as read"
+              >
+                Read
+              </button>
+            )}
+            {onDismiss && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-black/10 text-lg leading-none"
+                aria-label="Dismiss notification"
+                title="Dismiss"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -124,7 +155,7 @@ const SidebarLink = ({ to, icon, label }) => (
   </NavLink>
 );
 
-export function AdminDashboardShell({ children, storeInfo, currentUser, onLogout }) {
+export function AdminDashboardShell({ children, storeInfo, currentUser, onLogout, headerExtra }) {
   const location = useLocation();
   const meta = PAGE_META[location.pathname] || PAGE_META['/'];
   const clock = new Date().toLocaleString('en-MY', {
@@ -190,7 +221,8 @@ export function AdminDashboardShell({ children, storeInfo, currentUser, onLogout
               <h2 className="text-xl font-bold text-slate-900">{meta.title}</h2>
               <p className="text-sm text-slate-500 mt-0.5">{meta.subtitle}</p>
             </div>
-            <div className="text-right text-xs text-slate-500 space-y-1">
+            <div className="text-right text-xs text-slate-500 space-y-1 flex flex-col items-end">
+              {headerExtra}
               <p className="font-semibold text-slate-700">{clock}</p>
               {(storeInfo.openingTime || storeInfo.closingTime) && (
                 <p>

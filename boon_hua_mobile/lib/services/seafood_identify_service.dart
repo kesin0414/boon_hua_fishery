@@ -83,39 +83,39 @@ class SeafoodIdentifyService {
             ? 'image/webp'
             : 'image/jpeg';
 
-    final base = await ApiConfig.baseUrl();
-    final response = await http
-        .post(
-          Uri.parse('$base/seafood/identify'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'imageBase64': base64Encode(bytes),
-            'mimeType': mimeType,
-          }),
-        )
-        .timeout(const Duration(seconds: 70));
+    const busyMessage =
+        'AI is on high demand right now. Please wait a bit for more quota, then try again.';
 
-    if (response.statusCode == 404) {
-      throw Exception(
-        'Seafood photo ID is not available on the server yet. '
-        'Ask admin to redeploy the API with /seafood/identify.',
-      );
-    }
-    if (response.statusCode == 429) {
-      throw Exception('AI is busy right now. Please try again in a minute.');
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      String detail = 'Could not identify this photo (${response.statusCode}).';
-      try {
-        final body = jsonDecode(response.body);
-        if (body is Map && body['detail'] != null) {
-          detail = '${body['detail']}';
-        }
-      } catch (_) {}
-      throw Exception(detail);
-    }
+    try {
+      final base = await ApiConfig.baseUrl();
+      final response = await http
+          .post(
+            Uri.parse('$base/seafood/identify'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'imageBase64': base64Encode(bytes),
+              'mimeType': mimeType,
+            }),
+          )
+          .timeout(const Duration(seconds: 70));
 
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    return SeafoodIdentifyResult.fromJson(data);
+      // Never show raw API / provider / billing text to the user.
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception(busyMessage);
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return SeafoodIdentifyResult.fromJson(data);
+    } on Exception catch (error) {
+      final text = error.toString();
+      if (text.contains('Could not read the photo') ||
+          text.contains('Photo is too large')) {
+        rethrow;
+      }
+      if (text.contains(busyMessage)) {
+        rethrow;
+      }
+      throw Exception(busyMessage);
+    }
   }
 }

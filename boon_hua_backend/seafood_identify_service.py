@@ -216,7 +216,33 @@ def identify_seafood_from_image(
             print(f"WARN: seafood identify via {name} failed: {exc}")
             errors.append(f"{name}: {exc}")
 
-    raise RuntimeError("; ".join(errors) if errors else "Seafood identify request failed")
+    joined = "; ".join(errors) if errors else "Seafood identify request failed"
+    lower = joined.lower()
+    # Prefer a short actionable message for the common dual-failure case.
+    gemini_busy = "high demand" in lower or "overloaded" in lower or "gemini http 503" in lower
+    openai_quota = (
+        "quota is empty" in lower
+        or "billing" in lower
+        or "insufficient_quota" in lower
+        or "credit" in lower
+    )
+    if gemini_busy and openai_quota:
+        raise RuntimeError(
+            "Seafood photo ID is unavailable right now: Gemini is overloaded and "
+            "OpenAI has no billing credits. Try again in a minute, or add OpenAI "
+            "credits / wait for Gemini capacity."
+        )
+    if gemini_busy:
+        raise RuntimeError(
+            "Gemini is temporarily overloaded (high demand). Please try again in a minute."
+        )
+    if openai_quota and "gemini" not in lower:
+        raise RuntimeError(
+            "OpenAI billing/quota is empty for this API key. "
+            "Add credits at platform.openai.com/account/billing, "
+            "or rely on GEMINI_API_KEY for photo ID."
+        )
+    raise RuntimeError(joined)
 
 
 def _openai_error_payload(body_text: str) -> dict[str, Any]:
@@ -441,10 +467,11 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
             # HTTPError is a URLError subclass — handle it before the generic URLError.
             except urllib.error.HTTPError as exc:
                 last_http = exc
-                if exc.code == 429 and attempt < 2:
+                # 429 rate limit and 503 high-demand are usually temporary.
+                if exc.code in (429, 503) and attempt < 2:
                     time.sleep(2 * (attempt + 1))
                     continue
-                if exc.code in (404, 400):
+                if exc.code in (404, 400, 429, 503):
                     last_error = RuntimeError(_gemini_error_message(exc))
                     break
                 raise RuntimeError(_gemini_error_message(exc)) from exc
@@ -458,7 +485,8 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
                     break
                 raise RuntimeError(f"Gemini network error: {exc}") from exc
 
-        if last_http is not None and last_http.code in (404, 400):
+        # Model unavailable / overloaded / bad id — try the next model.
+        if last_http is not None and last_http.code in (404, 400, 429, 503):
             continue
         if last_http is not None:
             raise RuntimeError(_gemini_error_message(last_http))
@@ -467,6 +495,12 @@ def _identify_with_gemini(*, image_b64: str, mime: str, api_key: str) -> dict[st
             continue
 
     if last_error is not None:
+        msg = str(last_error).lower()
+        if "high demand" in msg or "503" in msg or "unavailable" in msg:
+            raise RuntimeError(
+                "Gemini is temporarily overloaded (high demand). "
+                "Please try again in a minute."
+            ) from last_error
         raise last_error
     raise RuntimeError("Gemini seafood identify request failed")
 

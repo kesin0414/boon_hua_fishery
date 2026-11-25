@@ -11,7 +11,8 @@ class MarketInventoryItem {
 
   final String id;
   final String species;
-  /// List/market price in RM per kg (`price` field in Firestore).
+  /// Daily market / selling price in RM per kg (`price` in Firestore).
+  /// Not landing/farm-gate cost (`landingPrice`) — that is admin-only for loss valuation.
   final double pricePerKg;
   final double weightKg;
   final String status;

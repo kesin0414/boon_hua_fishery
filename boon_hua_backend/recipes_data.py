@@ -48,7 +48,7 @@ RECIPE_CATALOG = [
     },
     {
         "id": "steamed-fish-ginger",
-        "keywords": ["fish", "snapper", "tilapia", "ikan", "salmon", "mackerel"],
+        "keywords": ["fish", "snapper", "tilapia", "ikan", "salmon", "mackerel", "pomfret", "grouper", "threadfin", "herring", "scad", "kurau", "senangin", "kerapu"],
         "title": "Steamed Fish with Ginger & Soy",
         "minutes": 22,
         "difficulty": "Easy",
@@ -69,7 +69,7 @@ RECIPE_CATALOG = [
     },
     {
         "id": "fried-fish-tumeric",
-        "keywords": ["fish", "ikan", "tilapia", "mackerel"],
+        "keywords": ["fish", "ikan", "tilapia", "mackerel", "pomfret", "grouper", "threadfin", "herring", "scad", "cencaru"],
         "title": "Turmeric Fried Fish",
         "minutes": 30,
         "difficulty": "Medium",

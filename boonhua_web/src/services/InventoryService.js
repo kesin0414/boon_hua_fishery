@@ -4,6 +4,7 @@ import {
   addDoc,
   updateDoc,
   doc,
+  getDoc,
   getDocs,
   query,
   where,
@@ -45,6 +46,31 @@ export class InventoryService {
     }
   }
 
+  /** Deduct kg from one inventory batch (used when spoilage is tied to a landing-price batch). */
+  async deductStockFromBatch(inventoryId, quantityKg) {
+    const qty = parseFloat(quantityKg) || 0;
+    if (!inventoryId || qty <= 0) {
+      throw new Error('Select a stock batch and a valid weight to remove.');
+    }
+    const docSnap = await getDoc(doc(db, 'inventory', inventoryId));
+    if (!docSnap.exists()) {
+      throw new Error('Selected stock batch was not found.');
+    }
+    const data = docSnap.data();
+    const current = parseFloat(data.weight || 0);
+    if (qty > current + 0.0001) {
+      throw new Error(
+        `Cannot remove more than this batch holds (${current.toFixed(1)} kg).`,
+      );
+    }
+    const nextWeight = Number((current - qty).toFixed(1));
+    await updateDoc(doc(db, 'inventory', inventoryId), {
+      weight: nextWeight,
+      status: stockStatusForWeight(nextWeight),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
   async restoreStock(inventory, species, quantityKg, pricePerKg = null) {
     const label = formatSpeciesLabel(species);
     const matches = findInventoryMatches(inventory, species);
@@ -80,8 +106,33 @@ export class InventoryService {
     await updateDoc(doc(db, 'inventory', item.id), patch);
   }
 
-  async updateItemPrice(itemId, newPrice) {
-    await updateDoc(doc(db, 'inventory', itemId), { price: newPrice });
+  /**
+   * Inline daily market price edit (inventory table, no Edit modal).
+   * Writes inventory.price and a stock-ledger price_change line.
+   */
+  async updateItemPrice(itemId, newPrice, meta = {}) {
+    const price = parseFloat(newPrice);
+    if (Number.isNaN(price) || price < 0) {
+      throw new Error('Invalid daily market price');
+    }
+    const prev = parseFloat(meta.previousPrice);
+    await updateDoc(doc(db, 'inventory', itemId), {
+      price,
+      updatedAt: serverTimestamp(),
+    });
+    if (!Number.isNaN(prev) && Math.abs(prev - price) > 0.0001) {
+      const species = formatSpeciesLabel(meta.species || '');
+      await this.recordHistory({
+        type: 'price_change',
+        direction: 'in',
+        species,
+        quantityKg: 0,
+        pricePerKg: price,
+        inventoryId: itemId,
+        reference: `INV-${String(itemId).slice(0, 8)}`,
+        note: `Admin edit: daily market price RM ${prev.toFixed(2)}/kg → RM ${price.toFixed(2)}/kg`,
+      });
+    }
   }
 
   async recordHistory(entry) {
@@ -109,6 +160,10 @@ export class InventoryService {
   async recordEditHistory(itemId, before, after) {
     const species = formatSpeciesLabel(after.species);
     const price = parseFloat(after.price) || 0;
+    const landing = parseFloat(after.landingPrice);
+    const landingOrNull = Number.isNaN(landing) ? null : landing;
+    // Weight adjustments use landing/farm-gate when known (cost impact); else daily price.
+    const costPrice = landingOrNull != null ? landingOrNull : price;
     const prevWeight = parseFloat(before.weight) || 0;
     const newWeight = parseFloat(after.weight) || 0;
     const delta = Number((newWeight - prevWeight).toFixed(2));
@@ -120,8 +175,8 @@ export class InventoryService {
         direction: delta > 0 ? 'in' : 'out',
         species,
         quantityKg: Math.abs(delta),
-        pricePerKg: price,
-        totalAmountRm: Number((Math.abs(delta) * price).toFixed(2)),
+        pricePerKg: costPrice,
+        totalAmountRm: Number((Math.abs(delta) * costPrice).toFixed(2)),
         inventoryId: itemId,
         reference: ref,
         note:
@@ -166,7 +221,36 @@ export class InventoryService {
         pricePerKg: price,
         inventoryId: itemId,
         reference: ref,
-        note: `Admin edit: price RM ${prevPrice.toFixed(2)}/kg → RM ${price.toFixed(2)}/kg`,
+        note: `Admin edit: daily market price RM ${prevPrice.toFixed(2)}/kg → RM ${price.toFixed(2)}/kg`,
+      });
+    }
+
+    const prevLanding = parseFloat(before.landingPrice);
+    if (
+      landingOrNull != null
+      && !Number.isNaN(prevLanding)
+      && prevLanding !== landingOrNull
+    ) {
+      await this.recordHistory({
+        type: 'price_change',
+        direction: 'in',
+        species,
+        quantityKg: 0,
+        pricePerKg: landingOrNull,
+        inventoryId: itemId,
+        reference: ref,
+        note: `Admin edit: landing/farm-gate RM ${prevLanding.toFixed(2)}/kg → RM ${landingOrNull.toFixed(2)}/kg`,
+      });
+    } else if (landingOrNull != null && Number.isNaN(prevLanding)) {
+      await this.recordHistory({
+        type: 'price_change',
+        direction: 'in',
+        species,
+        quantityKg: 0,
+        pricePerKg: landingOrNull,
+        inventoryId: itemId,
+        reference: ref,
+        note: `Admin edit: landing/farm-gate set to RM ${landingOrNull.toFixed(2)}/kg`,
       });
     }
   }
@@ -212,6 +296,8 @@ export class InventoryService {
 export const inventoryService = new InventoryService();
 
 export const deductInventoryStock = (...args) => inventoryService.deductStock(...args);
+export const deductInventoryStockFromBatch = (...args) =>
+  inventoryService.deductStockFromBatch(...args);
 export const restoreInventoryStock = (...args) => inventoryService.restoreStock(...args);
 export const recordInventoryHistory = (...args) => inventoryService.recordHistory(...args);
 export const recordInventoryEditHistory = (...args) => inventoryService.recordEditHistory(...args);

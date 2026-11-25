@@ -1,5 +1,14 @@
 import 'package:flutter/material.dart';
 
+/// Time-of-day greeting using the device's local clock.
+String timeOfDayGreeting([DateTime? now]) {
+  final hour = (now ?? DateTime.now()).hour;
+  if (hour >= 5 && hour < 12) return 'Good morning!';
+  if (hour >= 12 && hour < 17) return 'Good afternoon!';
+  if (hour >= 17 && hour < 21) return 'Good evening!';
+  return 'Good night!';
+}
+
 /// Brand colours shared by logo and splash screens.
 class BrandColors {
   static const navy = Color(0xFF2F3C95);

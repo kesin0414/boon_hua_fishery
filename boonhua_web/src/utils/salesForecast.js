@@ -210,29 +210,40 @@ export class SalesForecastService {
   /** Plain-language subtitle for the Sales prediction card. */
   forecastSubtitle(forecast) {
     if (forecast.source === 'local') {
-      return 'Quick estimate from your sales records on this screen.';
+      return 'Simple on-screen estimate (scikit-learn server was unreachable).';
     }
     if (forecast.source === 'ml-baseline') {
-      return 'Early estimate from your sales — log more days for sharper numbers.';
+      return 'Early estimate — not enough history yet for full scikit-learn training.';
     }
-    return `Smart estimate from ${forecast.lookbackDays} days of your sales.`;
+    return `scikit-learn prediction from ${forecast.lookbackDays} days of sales.`;
+  }
+
+  /** ML / fallback method label shown at the bottom of the prediction card. */
+  forecastModelLabel(forecast) {
+    if (forecast.source === 'local') {
+      return 'Method: weighted average (NOT scikit-learn — check Settings → API URL, then refresh)';
+    }
+    if (forecast.source === 'ml-baseline') {
+      return 'Method: weighted average warmup (scikit-learn needs ~2+ weeks of daily sales history)';
+    }
+    return 'Method: Gradient Boosting Regressor (scikit-learn) — predicts next 7 days from past sales';
   }
 
   /** Plain-language footnote under the prediction stats. */
   forecastNote(forecast) {
     if (forecast.source === 'local') {
-      return 'Could not reach the prediction server. Check Settings → API URL is set to your live server, then refresh. The figures above still use your past sales.';
+      return 'Set Settings → API URL to https://boon-hua-fishery.onrender.com and refresh Overview to use scikit-learn.';
     }
     if (forecast.source === 'ml-baseline') {
-      return 'Keep recording sales daily — predictions improve as history grows.';
+      return 'Keep recording sales on more days — full scikit-learn kicks in once there is enough history.';
     }
     if (forecast.confidence === 'high') {
-      return 'This forecast matches your recent daily sales patterns well.';
+      return 'This scikit-learn forecast matches your recent daily sales patterns well.';
     }
     if (forecast.confidence === 'medium') {
-      return 'A solid estimate — more sales history will refine it further.';
+      return 'Solid scikit-learn estimate — more sales history will refine it further.';
     }
-    return 'Still learning your shop’s pattern — keep logging sales each day.';
+    return 'scikit-learn is learning your shop’s pattern — keep logging sales each day.';
   }
 }
 
@@ -254,5 +265,7 @@ export const forecastSubtitle = (...args) =>
   salesForecastService.forecastSubtitle(...args);
 export const forecastNote = (...args) =>
   salesForecastService.forecastNote(...args);
+export const forecastModelLabel = (...args) =>
+  salesForecastService.forecastModelLabel(...args);
 
 export { salesForecastService };

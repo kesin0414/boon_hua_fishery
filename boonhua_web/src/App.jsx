@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Link, useSearchParams } from 'react-router-dom';
 import {
   AdminDashboardShell,
@@ -8,6 +8,11 @@ import {
   StatusBadge,
   generateSaleReference,
 } from './components/adminUi';
+import {
+  AdminNotificationProvider,
+  AdminNotificationBell,
+  NotificationAlert,
+} from './components/AdminNotificationContext';
 import { RevenueTrendChart } from './components/RevenueTrendChart';
 import {
   buildDailySeriesForForecast,
@@ -16,6 +21,7 @@ import {
   confidenceLabel,
   forecastNote,
   forecastSubtitle,
+  forecastModelLabel,
   DEFAULT_FORECAST_API,
   fetchMlSalesForecast,
 } from './utils/salesForecast';
@@ -24,9 +30,14 @@ import {
   parseLocalDate,
   eachDayInRange,
   getLast7DaysRange,
-  loadStoredDateRange,
   saveStoredDateRange,
+  getCurrentMonthRange,
+  saveStoredReportDateRange,
 } from './utils/dateUtils';
+import {
+  exportSalesReport,
+  buildSalesReportPayload,
+} from './utils/reportExport';
 import {
   getOrderDateKey,
   getOrderTotal,
@@ -34,7 +45,6 @@ import {
   getOrderAmountPaid,
   getOrderAmountOwing,
   isOrderOutstanding,
-  orderInMonthKey,
   paymentStatusReportLabel,
   getBuyerTypeLabel,
   BUYER_TYPES,
@@ -53,10 +63,29 @@ import {
   findInventoryMatches,
   consolidateInventoryBySpecies,
   stockStatusForWeight,
+  LOW_STOCK_THRESHOLD_KG,
+  isLowStockWeight,
+  STOCK_STATUS_OPTIONS,
+  stockStatusFilterLabel,
+  landingPriceOf,
 } from './domain/InventorySpecies';
+import { stockLossesNotificationId } from './utils/adminNotifications';
+import {
+  SEAFOOD_CATALOG,
+  catalogSpeciesNames,
+  findCatalogEntry,
+} from './domain/SeafoodCatalog';
+import {
+  SEAFOOD_CATEGORY_OPTIONS,
+  resolveSeafoodCategory,
+  categoryFromIconKey,
+  categoryBadgeClass,
+  categoryEmoji,
+} from './domain/SeafoodCategory';
 import {
   inventoryService,
   deductInventoryStock,
+  deductInventoryStockFromBatch,
   restoreInventoryStock,
   recordInventoryHistory,
   recordInventoryEditHistory,
@@ -68,6 +97,7 @@ import {
   openBuyerWhatsApp,
   buyerCollectionMessage,
 } from './utils/whatsapp';
+import { resolveWebAdminSession } from './utils/adminSession';
 
 // --- FIREBASE IMPORTS ---
 import { auth, db } from './firebase';
@@ -92,15 +122,6 @@ import {
   where,
   serverTimestamp,
 } from "firebase/firestore";
-
-function getMonthBounds(monthKey) {
-  const [year, month] = monthKey.split('-').map(Number);
-  const from = `${year}-${String(month).padStart(2, '0')}-01`;
-  const lastDay = new Date(year, month, 0).getDate();
-  const to = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-  const label = new Date(year, month - 1, 1).toLocaleDateString('en-MY', { month: 'long', year: 'numeric' });
-  return { year, month, from, to, label };
-}
 
 // ==========================================
 // 1. SETTINGS PAGE
@@ -453,6 +474,81 @@ const SettingsPage = ({ currentUser }) => {
 // ==========================================
 // 2. INVENTORY & PRICING (Firestore)
 // ==========================================
+const INVENTORY_STATUS_RANK = {
+  'Out of Stock': 0,
+  'Low Stock': 1,
+  'In Stock': 2,
+};
+
+function inventoryTimestamp(value) {
+  if (!value) return 0;
+  if (typeof value.toDate === 'function') return value.toDate().getTime();
+  if (value instanceof Date) return value.getTime();
+  return 0;
+}
+
+function formatInventoryDate(value) {
+  const ms = inventoryTimestamp(value);
+  if (!ms) return '—';
+  return new Date(ms).toLocaleString('en-MY', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function inventoryDateIso(value) {
+  const ms = inventoryTimestamp(value);
+  if (!ms) return formatLocalDate(new Date());
+  return formatLocalDate(new Date(ms));
+}
+
+/**
+ * Spoilage/loss batches: only inventory rows that still have stock.
+ * Loss value uses landing/farm-gate cost (not daily market selling price).
+ */
+function buildSpoilagePriceBatches(inventory, species) {
+  if (!species) return [];
+  const key = normalizeSpeciesName(species);
+
+  return inventory
+    .filter(
+      (item) =>
+        normalizeSpeciesName(item.species) === key &&
+        (parseFloat(item.weight) || 0) > 0,
+    )
+    .map((item) => {
+      const landing = landingPriceOf(item);
+      const availableKg = parseFloat(item.weight) || 0;
+      const batchDate = inventoryDateIso(item.createdAt || item.updatedAt);
+      const pricePerKg = landing != null ? landing : 0;
+      const priceLabel = landing != null
+        ? `landing RM ${landing.toFixed(2)}/kg`
+        : 'landing price not set';
+      return {
+        id: `inv:${item.id}`,
+        inventoryId: item.id,
+        batchDate,
+        pricePerKg,
+        landingPrice: landing,
+        dailyPrice: parseFloat(item.price) || 0,
+        availableKg,
+        label: `${batchDate} · ${priceLabel} · ${availableKg.toFixed(1)} kg left`,
+      };
+    })
+    .sort((a, b) => String(b.batchDate).localeCompare(String(a.batchDate)));
+}
+
+function inventoryItemStockStatus(item) {
+  return stockStatusForWeight(parseFloat(item.weight) || 0);
+}
+
+function inventoryStatusRank(item) {
+  return INVENTORY_STATUS_RANK[inventoryItemStockStatus(item)] ?? 0;
+}
+
 const InventoryPage = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const ledgerTabFromUrl = () => {
@@ -463,7 +559,13 @@ const InventoryPage = () => {
   const [isLoading, setIsLoading] = useState(true); // FIX: loading state added
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editItem, setEditItem] = useState(null);
-  const [newCatch, setNewCatch] = useState({ species: '', weight: '', price: '' });
+  const [newCatch, setNewCatch] = useState({
+    species: '',
+    weight: '',
+    landingPrice: '',
+    price: '',
+    category: 'Fish',
+  });
   // FIX: track local price edits per item to avoid defaultValue/uncontrolled anti-pattern
   const [localPrices, setLocalPrices] = useState({});
   const [activeTab, setActiveTab] = useState(() => (ledgerTabFromUrl() ? 'history' : 'stock'));
@@ -471,11 +573,24 @@ const InventoryPage = () => {
   const [isRemovalOpen, setIsRemovalOpen] = useState(false);
   const [removalForm, setRemovalForm] = useState({
     species: '',
+    batchId: '',
+    batchDate: '',
+    pricePerKg: '',
     quantityKg: '',
     reason: 'spoiled',
     note: '',
   });
   const [isRemoving, setIsRemoving] = useState(false);
+  const [inventorySort, setInventorySort] = useState({ field: 'updatedAt', direction: 'desc' });
+  const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState('All');
+  const [visibleStockStatuses, setVisibleStockStatuses] = useState(() => (
+    Object.fromEntries(STOCK_STATUS_OPTIONS.map((status) => [status, true]))
+  ));
+
+  const missingLandingCount = useMemo(
+    () => inventory.filter((item) => landingPriceOf(item) == null).length,
+    [inventory],
+  );
 
   useEffect(() => {
     setActiveTab(ledgerTabFromUrl() ? 'history' : 'stock');
@@ -515,25 +630,34 @@ const InventoryPage = () => {
       return;
     }
     const addedWeight = parseFloat(newCatch.weight) || 0;
+    const newLanding = parseFloat(newCatch.landingPrice);
     const newPrice = parseFloat(newCatch.price);
     if (addedWeight <= 0) {
       alert('Weight must be greater than 0 kg.');
       return;
     }
-    if (Number.isNaN(newPrice)) {
-      alert('Please enter a valid price.');
+    if (Number.isNaN(newLanding) || newLanding < 0) {
+      alert('Please enter a valid landing / farm-gate price (what you paid per kg).');
+      return;
+    }
+    if (Number.isNaN(newPrice) || newPrice < 0) {
+      alert('Please enter a valid daily market price (selling RM/kg for the app).');
       return;
     }
 
     const existingMatches = findInventoryMatches(inventory, species);
     const existing = existingMatches[0];
 
+    const category = resolveSeafoodCategory(species, newCatch.category);
+
     try {
       if (existing) {
         const combinedWeight = parseFloat(existing.weight || 0) + addedWeight;
         await updateDoc(doc(db, 'inventory', existing.id), {
           species,
+          category,
           weight: Number(combinedWeight.toFixed(1)),
+          landingPrice: newLanding,
           price: newPrice,
           status: stockStatusForWeight(combinedWeight),
           updatedAt: serverTimestamp(),
@@ -543,23 +667,25 @@ const InventoryPage = () => {
           direction: 'in',
           species,
           quantityKg: addedWeight,
-          pricePerKg: newPrice,
-          totalAmountRm: Number((addedWeight * newPrice).toFixed(2)),
-          note: `Added ${addedWeight.toFixed(1)} kg to existing stock`,
+          pricePerKg: newLanding,
+          totalAmountRm: Number((addedWeight * newLanding).toFixed(2)),
+          note: `Added ${addedWeight.toFixed(1)} kg · landing RM ${newLanding.toFixed(2)}/kg · daily market RM ${newPrice.toFixed(2)}/kg`,
         });
         if (existingMatches.length > 1) {
           alert(
-            `Combined ${addedWeight.toFixed(1)} kg with existing "${species}" (${combinedWeight.toFixed(1)} kg total). Price updated to RM ${newPrice.toFixed(2)}/kg.\n\nNote: ${existingMatches.length - 1} older duplicate record(s) still exist — edit or delete them in the table if needed.`
+            `Combined ${addedWeight.toFixed(1)} kg with existing "${species}" (${combinedWeight.toFixed(1)} kg total).\nLanding/farm-gate: RM ${newLanding.toFixed(2)}/kg\nDaily market: RM ${newPrice.toFixed(2)}/kg\n\nNote: ${existingMatches.length - 1} older duplicate record(s) still exist — edit or delete them in the table if needed.`
           );
         } else {
           alert(
-            `Combined with existing "${species}": ${combinedWeight.toFixed(1)} kg in stock. Price updated to RM ${newPrice.toFixed(2)}/kg.`
+            `Combined with existing "${species}": ${combinedWeight.toFixed(1)} kg in stock.\nLanding/farm-gate: RM ${newLanding.toFixed(2)}/kg\nDaily market: RM ${newPrice.toFixed(2)}/kg`
           );
         }
       } else {
         await addDoc(collection(db, 'inventory'), {
           species,
+          category,
           weight: Number(addedWeight.toFixed(1)),
+          landingPrice: newLanding,
           price: newPrice,
           status: stockStatusForWeight(addedWeight),
           createdAt: serverTimestamp(),
@@ -569,38 +695,56 @@ const InventoryPage = () => {
           direction: 'in',
           species,
           quantityKg: addedWeight,
-          pricePerKg: newPrice,
-          totalAmountRm: Number((addedWeight * newPrice).toFixed(2)),
-          note: 'New catch logged',
+          pricePerKg: newLanding,
+          totalAmountRm: Number((addedWeight * newLanding).toFixed(2)),
+          note: `New catch · landing RM ${newLanding.toFixed(2)}/kg · daily market RM ${newPrice.toFixed(2)}/kg`,
         });
       }
       setIsModalOpen(false);
-      setNewCatch({ species: '', weight: '', price: '' });
+      setNewCatch({ species: '', weight: '', landingPrice: '', price: '', category: 'Fish' });
     } catch (error) {
       alert('Database Error: ' + error.message);
     }
   };
 
   const handlePriceUpdate = async (id) => {
-    const newPrice = parseFloat(localPrices[id]) || 0;
+    const raw = localPrices[id];
+    if (raw === undefined) return;
+    const newPrice = parseFloat(raw);
+    if (Number.isNaN(newPrice) || newPrice < 0) {
+      alert('Please enter a valid daily market price (RM/kg).');
+      return;
+    }
+    const item = inventory.find((row) => row.id === id);
+    if (!item) return;
+    const previousPrice = parseFloat(item.price) || 0;
+    if (Math.abs(previousPrice - newPrice) < 0.0001) return;
     try {
-      await inventoryService.updateItemPrice(id, newPrice);
+      await inventoryService.updateItemPrice(id, newPrice, {
+        species: item.species,
+        previousPrice,
+      });
     } catch (error) {
-      alert("Database Error: " + error.message);
+      alert('Database Error: ' + error.message);
     }
   };
 
   const openEditItem = (item) => {
+    const weight = parseFloat(item.weight) || 0;
+    const landing = landingPriceOf(item);
     setEditItem({
       ...item,
       weight: item.weight ?? '',
+      landingPrice: landing != null ? String(landing) : (item.landingPrice ?? ''),
       price: item.price ?? '',
-      status: item.status || 'In Stock',
+      category: resolveSeafoodCategory(item.species, item.category),
       _snapshot: {
         species: item.species || '',
-        weight: parseFloat(item.weight) || 0,
+        weight,
+        landingPrice: landing,
         price: parseFloat(item.price) || 0,
-        status: item.status || 'In Stock',
+        status: inventoryItemStockStatus(item),
+        category: resolveSeafoodCategory(item.species, item.category),
       },
     });
   };
@@ -608,26 +752,35 @@ const InventoryPage = () => {
   const handleUpdateItem = async (e) => {
     e.preventDefault();
     const newWeight = parseFloat(editItem.weight);
+    const newLanding = parseFloat(editItem.landingPrice);
     const newPrice = parseFloat(editItem.price);
     if (Number.isNaN(newWeight) || newWeight < 0) {
       alert('Stock (kg) must be zero or greater.');
       return;
     }
-    if (Number.isNaN(newPrice)) {
-      alert('Please enter a valid price.');
+    if (Number.isNaN(newLanding) || newLanding < 0) {
+      alert('Please enter a valid landing / farm-gate price (RM/kg).');
+      return;
+    }
+    if (Number.isNaN(newPrice) || newPrice < 0) {
+      alert('Please enter a valid daily market price (RM/kg).');
       return;
     }
     const after = {
       species: editItem.species,
       weight: newWeight,
+      landingPrice: newLanding,
       price: newPrice,
-      status: editItem.status,
+      status: stockStatusForWeight(newWeight),
+      category: resolveSeafoodCategory(editItem.species, editItem.category),
     };
     const before = editItem._snapshot || after;
     try {
       await updateDoc(doc(db, "inventory", editItem.id), {
         species: formatSpeciesLabel(after.species),
+        category: after.category,
         weight: Number(newWeight.toFixed(1)),
+        landingPrice: newLanding,
         price: newPrice,
         status: after.status,
         updatedAt: serverTimestamp(),
@@ -642,20 +795,24 @@ const InventoryPage = () => {
   const handleDeleteItem = async (item) => {
     const weight = parseFloat(item.weight || 0);
     const confirmed = window.confirm(
-      `Delete ${item.species} from inventory?${weight > 0 ? ` This removes ${weight.toFixed(1)} kg from stock and is logged in history.` : ''}`,
+      `Delete ${item.species} from inventory?${weight > 0 ? ` This removes ${weight.toFixed(1)} kg from stock and is logged in history at landing/farm-gate cost.` : ''}`,
     );
     if (!confirmed) return;
     try {
       if (weight > 0) {
+        const landing = landingPriceOf(item);
+        const lossPrice = landing != null ? landing : (parseFloat(item.price) || 0);
         await recordInventoryHistory({
           type: 'inventory_delete',
           direction: 'out',
           species: item.species,
           quantityKg: weight,
-          pricePerKg: parseFloat(item.price) || null,
-          totalAmountRm: weight * (parseFloat(item.price) || 0),
+          pricePerKg: lossPrice,
+          totalAmountRm: weight * lossPrice,
           inventoryId: item.id,
-          note: `Admin deleted inventory batch — ${weight.toFixed(1)} kg removed from stock list`,
+          note: landing != null
+            ? `Admin deleted inventory batch — ${weight.toFixed(1)} kg at landing RM ${landing.toFixed(2)}/kg`
+            : `Admin deleted inventory batch — ${weight.toFixed(1)} kg (no landing price; used daily price)`,
         });
       } else {
         await recordInventoryHistory({
@@ -678,18 +835,148 @@ const InventoryPage = () => {
     [inventory]
   );
 
+  const sortedInventory = useMemo(() => {
+    const items = inventory.filter((item) => {
+      const status = inventoryItemStockStatus(item);
+      if (!visibleStockStatuses[status]) return false;
+      if (inventoryCategoryFilter === 'All') return true;
+      const category = resolveSeafoodCategory(item.species, item.category);
+      return category === inventoryCategoryFilter;
+    });
+    const dir = inventorySort.direction === 'asc' ? 1 : -1;
+    items.sort((a, b) => {
+      let cmp = 0;
+      switch (inventorySort.field) {
+        case 'species':
+          cmp = (a.species || '').localeCompare(b.species || '', undefined, { sensitivity: 'base' });
+          break;
+        case 'category':
+          cmp = resolveSeafoodCategory(a.species, a.category).localeCompare(
+            resolveSeafoodCategory(b.species, b.category),
+            undefined,
+            { sensitivity: 'base' },
+          );
+          break;
+        case 'weight':
+          cmp = (parseFloat(a.weight) || 0) - (parseFloat(b.weight) || 0);
+          break;
+        case 'landingPrice':
+          cmp = (landingPriceOf(a) || 0) - (landingPriceOf(b) || 0);
+          break;
+        case 'price':
+          cmp = (parseFloat(a.price) || 0) - (parseFloat(b.price) || 0);
+          break;
+        case 'status':
+          cmp = inventoryStatusRank(a) - inventoryStatusRank(b);
+          break;
+        case 'createdAt':
+          cmp = inventoryTimestamp(a.createdAt) - inventoryTimestamp(b.createdAt);
+          break;
+        case 'updatedAt':
+        default:
+          cmp = inventoryTimestamp(a.updatedAt) - inventoryTimestamp(b.updatedAt);
+          if (cmp === 0) {
+            cmp = inventoryTimestamp(a.createdAt) - inventoryTimestamp(b.createdAt);
+          }
+          break;
+      }
+      return cmp * dir;
+    });
+    return items;
+  }, [inventory, inventorySort, inventoryCategoryFilter, visibleStockStatuses]);
+
+  const toggleStockStatusVisibility = (status) => {
+    setVisibleStockStatuses((prev) => ({ ...prev, [status]: !prev[status] }));
+  };
+
+  const hiddenStockStatusLabels = STOCK_STATUS_OPTIONS.filter((status) => !visibleStockStatuses[status]);
+
+  const handleInventorySort = (field) => {
+    setInventorySort((prev) => {
+      if (prev.field === field) {
+        return { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      const defaultDesc = ['weight', 'landingPrice', 'price', 'updatedAt', 'createdAt', 'status', 'category'].includes(field);
+      return { field, direction: defaultDesc ? 'desc' : 'asc' };
+    });
+  };
+
+  const inventorySortIcon = (field) => {
+    if (inventorySort.field !== field) return '↕';
+    return inventorySort.direction === 'asc' ? '↑' : '↓';
+  };
+
+  const removalPriceBatches = useMemo(
+    () => buildSpoilagePriceBatches(inventory, removalForm.species),
+    [inventory, removalForm.species],
+  );
+
+  const selectedRemovalBatch = useMemo(
+    () => removalPriceBatches.find((batch) => batch.id === removalForm.batchId) || null,
+    [removalPriceBatches, removalForm.batchId],
+  );
+
   const removalMaxKg = useMemo(() => {
+    if (selectedRemovalBatch?.availableKg != null) {
+      return selectedRemovalBatch.availableKg;
+    }
     const item = inStockItems.find(
-      inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(removalForm.species)
+      (inv) => normalizeSpeciesName(inv.species) === normalizeSpeciesName(removalForm.species),
     );
     return item ? parseFloat(item.weight || 0) : 0;
-  }, [inStockItems, removalForm.species]);
+  }, [inStockItems, removalForm.species, selectedRemovalBatch]);
+
+  const removalLedgerValue = useMemo(() => {
+    const qty = parseFloat(removalForm.quantityKg) || 0;
+    const price = parseFloat(removalForm.pricePerKg) || 0;
+    return Number((qty * price).toFixed(2));
+  }, [removalForm.quantityKg, removalForm.pricePerKg]);
+
+  const applyRemovalBatch = (batchId) => {
+    const batch = removalPriceBatches.find((row) => row.id === batchId);
+    if (!batch) {
+      setRemovalForm((prev) => ({
+        ...prev,
+        batchId: '',
+        batchDate: '',
+        pricePerKg: '',
+        quantityKg: '',
+      }));
+      return;
+    }
+    setRemovalForm((prev) => ({
+      ...prev,
+      batchId: batch.id,
+      batchDate: batch.batchDate,
+      pricePerKg: String(batch.pricePerKg),
+      quantityKg: '',
+    }));
+  };
 
   const handleStockRemoval = async (e) => {
     e.preventDefault();
     const quantity = parseFloat(removalForm.quantityKg) || 0;
+    const price = parseFloat(removalForm.pricePerKg);
     if (!removalForm.species) {
       alert('Select a species.');
+      return;
+    }
+    if (!removalForm.batchId) {
+      alert('Select the in-stock batch this loss belongs to.');
+      return;
+    }
+    if (selectedRemovalBatch?.landingPrice == null) {
+      alert(
+        'This batch has no landing / farm-gate price. Open Edit on that inventory row, set landing price, then record the loss.',
+      );
+      return;
+    }
+    if (Number.isNaN(price) || price < 0) {
+      alert('Landing / farm-gate price is missing for this batch.');
+      return;
+    }
+    if (Math.abs(price - selectedRemovalBatch.landingPrice) > 0.0001) {
+      alert('Loss value must use the batch landing / farm-gate price. Re-select the batch.');
       return;
     }
     if (quantity <= 0) {
@@ -697,16 +984,23 @@ const InventoryPage = () => {
       return;
     }
     if (quantity > removalMaxKg) {
-      alert(`Cannot remove more than on hand (${removalMaxKg.toFixed(1)} kg).`);
+      alert(`Cannot remove more than available (${removalMaxKg.toFixed(1)} kg).`);
       return;
     }
-    const item = inStockItems.find(
-      inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(removalForm.species)
-    );
     setIsRemoving(true);
     try {
-      await deductInventoryStock(inventory, removalForm.species, quantity);
-      const price = parseFloat(item?.price || 0);
+      const inventoryId = selectedRemovalBatch?.inventoryId || null;
+      if (inventoryId) {
+        await deductInventoryStockFromBatch(inventoryId, quantity);
+      } else {
+        await deductInventoryStock(inventory, removalForm.species, quantity);
+      }
+      const batchDate = removalForm.batchDate || selectedRemovalBatch?.batchDate || '';
+      const reasonLabel = movementTypeLabel(removalForm.reason);
+      const batchNote = batchDate
+        ? `Landing/farm-gate ${batchDate} · RM ${price.toFixed(2)}/kg`
+        : `Landing/farm-gate RM ${price.toFixed(2)}/kg`;
+      const note = [removalForm.note.trim(), batchNote].filter(Boolean).join(' — ') || reasonLabel;
       await recordInventoryHistory({
         type: removalForm.reason,
         direction: 'out',
@@ -714,10 +1008,19 @@ const InventoryPage = () => {
         quantityKg: quantity,
         pricePerKg: price,
         totalAmountRm: Number((quantity * price).toFixed(2)),
-        note: removalForm.note || movementTypeLabel(removalForm.reason),
+        inventoryId: inventoryId || null,
+        note,
       });
       setIsRemovalOpen(false);
-      setRemovalForm({ species: '', quantityKg: '', reason: 'spoiled', note: '' });
+      setRemovalForm({
+        species: '',
+        batchId: '',
+        batchDate: '',
+        pricePerKg: '',
+        quantityKg: '',
+        reason: 'spoiled',
+        note: '',
+      });
     } catch (error) {
       alert('Database Error: ' + error.message);
     } finally {
@@ -725,20 +1028,39 @@ const InventoryPage = () => {
     }
   };
 
+  const applyCatalogSpecies = (speciesName) => {
+    const entry = findCatalogEntry(speciesName);
+    if (!entry) return;
+    setNewCatch({
+      species: entry.name,
+      weight: newCatch.weight,
+      landingPrice: newCatch.landingPrice,
+      price: String(entry.pricePerKg),
+      category: categoryFromIconKey(entry.iconKey),
+    });
+  };
+
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 flex flex-col h-full relative">
-      <AlertBanner variant="info" title="How stock works in this system">
-        New catch is logged in <strong>kilograms (kg)</strong> with a <strong>daily price (RM/kg)</strong>.
-        Sales and spoilage reduce kg automatically; every change (including admin deletions) is listed under Stock ledger.
-      </AlertBanner>
       <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
         <div className="flex flex-wrap gap-2 text-xs">
           <span className="bg-slate-100 text-slate-700 px-3 py-1 rounded-full font-bold">
             {inventory.length} batch{inventory.length === 1 ? '' : 'es'}
           </span>
           <span className="bg-emerald-50 text-emerald-800 px-3 py-1 rounded-full font-bold">
-            {inStockItems.length} species in stock
+            {inStockItems.length} species with stock
           </span>
+          <span className="bg-amber-50 text-amber-800 px-3 py-1 rounded-full font-bold">
+            {inventory.filter((item) => isLowStockWeight(item.weight)).length} low stock
+          </span>
+          <span className="bg-slate-100 text-slate-600 px-3 py-1 rounded-full font-bold">
+            {inventory.filter((item) => (parseFloat(item.weight) || 0) <= 0).length} out of stock
+          </span>
+          {missingLandingCount > 0 && (
+            <span className="bg-amber-100 text-amber-900 px-3 py-1 rounded-full font-bold" title="Open Edit on each row to set landing / farm-gate">
+              {missingLandingCount} missing landing — use Edit
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -842,23 +1164,174 @@ const InventoryPage = () => {
         </div>
       ) : activeTab === 'stock' ? (
         <div className="overflow-x-auto">
+          {inventory.length > 0 && sortedInventory.length === 0 && (
+            <p className="text-sm text-amber-700 font-semibold mb-4">
+              {hiddenStockStatusLabels.length > 0 && inventoryCategoryFilter !== 'All'
+                ? `No items match the "${inventoryCategoryFilter}" category with the current stock-status filters.`
+                : hiddenStockStatusLabels.length > 0
+                  ? `All rows are hidden. Turn on: ${hiddenStockStatusLabels.map(stockStatusFilterLabel).join(', ')}.`
+                  : `No items in the "${inventoryCategoryFilter}" category. Choose "All categories" or edit items to recategorize.`}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-3 mb-4 no-print">
+            <span className="text-xs font-bold text-slate-500 uppercase">Sort by</span>
+            <select
+              value={inventorySort.field}
+              onChange={(e) => {
+                const field = e.target.value;
+                const defaultDesc = ['weight', 'landingPrice', 'price', 'updatedAt', 'createdAt', 'status', 'category'].includes(field);
+                setInventorySort({
+                  field,
+                  direction: inventorySort.field === field
+                    ? inventorySort.direction
+                    : (defaultDesc ? 'desc' : 'asc'),
+                });
+              }}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="species">Species name</option>
+              <option value="category">Category</option>
+              <option value="weight">Stock level (kg)</option>
+              <option value="landingPrice">Landing / farm-gate (RM/kg)</option>
+              <option value="price">Daily market price (RM/kg)</option>
+              <option value="status">Stock status</option>
+              <option value="updatedAt">Last updated</option>
+              <option value="createdAt">Date added</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => setInventorySort((prev) => ({
+                ...prev,
+                direction: prev.direction === 'asc' ? 'desc' : 'asc',
+              }))}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50"
+              title="Toggle sort direction"
+            >
+              {inventorySort.direction === 'asc' ? 'Low → high' : 'High → low'}
+            </button>
+            <span className="text-xs text-slate-400">or click a column header</span>
+            <span className="text-xs font-bold text-slate-500 uppercase ml-2">Filter</span>
+            <select
+              value={inventoryCategoryFilter}
+              onChange={(e) => setInventoryCategoryFilter(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="All">All categories</option>
+              {SEAFOOD_CATEGORY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.emoji} {option.label}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs font-bold text-slate-500 uppercase ml-2">Show status</span>
+            {STOCK_STATUS_OPTIONS.map((status) => (
+              <label
+                key={status}
+                className={`inline-flex items-center gap-1.5 border rounded-lg px-3 py-2 text-xs font-bold cursor-pointer select-none ${
+                  visibleStockStatuses[status]
+                    ? 'border-blue-200 bg-blue-50 text-blue-800'
+                    : 'border-slate-200 bg-slate-50 text-slate-400 line-through'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  checked={visibleStockStatuses[status]}
+                  onChange={() => toggleStockStatusVisibility(status)}
+                />
+                {stockStatusFilterLabel(status)}
+              </label>
+            ))}
+          </div>
           <table className="bh-table w-full text-left border-collapse">
             <thead>
               <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
-                <th className="p-4 rounded-tl-lg">Species</th>
-                <th className="p-4">Weight (kg)</th>
-                <th className="p-4 text-blue-600">Daily Price (RM/kg)</th>
-                <th className="p-4">Status</th>
+                <th className="p-4 rounded-tl-lg">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('species')}
+                    className="font-bold uppercase tracking-wide hover:text-blue-600 inline-flex items-center gap-1"
+                  >
+                    Species <span className="text-slate-400">{inventorySortIcon('species')}</span>
+                  </button>
+                </th>
+                <th className="p-4">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('category')}
+                    className="font-bold uppercase tracking-wide hover:text-blue-600 inline-flex items-center gap-1"
+                  >
+                    Category <span className="text-slate-400">{inventorySortIcon('category')}</span>
+                  </button>
+                </th>
+                <th className="p-4">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('weight')}
+                    className="font-bold uppercase tracking-wide hover:text-blue-600 inline-flex items-center gap-1"
+                  >
+                    Weight (kg) <span className="text-slate-400">{inventorySortIcon('weight')}</span>
+                  </button>
+                </th>
+                <th className="p-4 text-amber-700">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('landingPrice')}
+                    className="font-bold uppercase tracking-wide text-amber-700 hover:text-amber-900 inline-flex items-center gap-1"
+                  >
+                    Landing / farm-gate <span className="text-amber-500">{inventorySortIcon('landingPrice')}</span>
+                  </button>
+                </th>
+                <th className="p-4 text-blue-600">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('price')}
+                    className="font-bold uppercase tracking-wide text-blue-600 hover:text-blue-800 inline-flex items-center gap-1"
+                  >
+                    Daily market (RM/kg) <span className="text-blue-400">{inventorySortIcon('price')}</span>
+                  </button>
+                </th>
+                <th className="p-4">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('status')}
+                    className="font-bold uppercase tracking-wide hover:text-blue-600 inline-flex items-center gap-1"
+                  >
+                    Status <span className="text-slate-400">{inventorySortIcon('status')}</span>
+                  </button>
+                </th>
+                <th className="p-4">
+                  <button
+                    type="button"
+                    onClick={() => handleInventorySort('updatedAt')}
+                    className="font-bold uppercase tracking-wide hover:text-blue-600 inline-flex items-center gap-1"
+                  >
+                    Last updated <span className="text-slate-400">{inventorySortIcon('updatedAt')}</span>
+                  </button>
+                </th>
                 <th className="p-4 rounded-tr-lg text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {inventory.map((item) => (
+              {sortedInventory.map((item) => {
+                const category = resolveSeafoodCategory(item.species, item.category);
+                return (
                 <tr key={item.id} className="border-b hover:bg-slate-50/50">
                   <td className="p-4 font-semibold text-slate-800">{item.species}</td>
-                  <td className="p-4 text-slate-600">{item.weight} kg</td>
                   <td className="p-4">
-                    {/* FIX: controlled input using localPrices state — no more defaultValue */}
+                    <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${categoryBadgeClass(category)}`}>
+                      <span>{categoryEmoji(category)}</span>
+                      {category}
+                    </span>
+                  </td>
+                  <td className="p-4 text-slate-600">{item.weight} kg</td>
+                  <td className="p-4 text-amber-900 text-sm whitespace-nowrap">
+                    {landingPriceOf(item) != null
+                      ? `RM ${landingPriceOf(item).toFixed(2)}`
+                      : <span className="text-slate-400">Not set</span>}
+                  </td>
+                  <td className="p-4">
+                    {/* Daily market price — syncs to mobile Market tab */}
                     <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-1 w-28 focus-within:ring-2 focus-within:ring-blue-500">
                       <span className="text-slate-400 font-bold text-sm">RM</span>
                       <input
@@ -867,11 +1340,15 @@ const InventoryPage = () => {
                         onChange={e => setLocalPrices(prev => ({ ...prev, [item.id]: e.target.value }))}
                         onBlur={() => handlePriceUpdate(item.id)}
                         className="w-full bg-transparent outline-none font-bold text-slate-800 text-sm"
+                        title="Daily market / selling price (shown in mobile Market)"
                       />
                     </div>
                   </td>
                   <td className="p-4">
-                    <StatusBadge status={item.status} />
+                    <StatusBadge status={inventoryItemStockStatus(item)} />
+                  </td>
+                  <td className="p-4 text-slate-500 text-sm whitespace-nowrap">
+                    {formatInventoryDate(item.updatedAt || item.createdAt)}
                   </td>
                   <td className="p-4">
                     <div className="flex justify-end gap-2">
@@ -884,7 +1361,8 @@ const InventoryPage = () => {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -892,20 +1370,31 @@ const InventoryPage = () => {
 
       {isRemovalOpen && (
         <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white w-full max-w-md rounded-2xl p-8 shadow-2xl">
+          <div className="bg-white w-full max-w-lg rounded-2xl p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
             <h3 className="text-xl font-bold mb-2 text-slate-800">Record spoilage or loss</h3>
-            <p className="text-sm text-slate-500 mb-6">Removes weight from stock (like a sale) and logs it in inventory history.</p>
+            <p className="text-sm text-slate-500 mb-6">
+              Choose a batch still in stock. Loss value always uses that batch&apos;s <strong>landing / farm-gate</strong> cost
+              (set via Edit on inventory). Daily market price is not used.
+            </p>
             <form onSubmit={handleStockRemoval} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Species</label>
                 <select
                   required
                   value={removalForm.species}
-                  onChange={e => setRemovalForm({ ...removalForm, species: e.target.value, quantityKg: '' })}
+                  onChange={(e) => setRemovalForm({
+                    species: e.target.value,
+                    batchId: '',
+                    batchDate: '',
+                    pricePerKg: '',
+                    quantityKg: '',
+                    reason: removalForm.reason,
+                    note: removalForm.note,
+                  })}
                   className="w-full border p-3 rounded-xl bg-white"
                 >
                   <option value="">Select in-stock item...</option>
-                  {inStockItems.map(item => (
+                  {inStockItems.map((item) => (
                     <option key={item.id} value={item.species}>
                       {item.species} ({parseFloat(item.weight).toFixed(1)} kg)
                     </option>
@@ -913,13 +1402,73 @@ const InventoryPage = () => {
                 </select>
               </div>
               <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                  Stock batch (date · landing RM/kg)
+                </label>
+                <select
+                  required
+                  disabled={!removalForm.species}
+                  value={removalForm.batchId}
+                  onChange={(e) => applyRemovalBatch(e.target.value)}
+                  className="w-full border p-3 rounded-xl bg-white disabled:bg-slate-50"
+                >
+                  <option value="">
+                    {removalForm.species
+                      ? (removalPriceBatches.length
+                        ? 'Select in-stock batch...'
+                        : 'No stock left for this species')
+                      : 'Select a species first'}
+                  </option>
+                  {removalPriceBatches.map((batch) => (
+                    <option key={batch.id} value={batch.id}>
+                      {batch.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Batch date</label>
+                  <input
+                    type="date"
+                    required
+                    disabled={!removalForm.batchId}
+                    value={removalForm.batchDate}
+                    onChange={(e) => setRemovalForm({ ...removalForm, batchDate: e.target.value })}
+                    className="w-full border p-3 rounded-xl disabled:bg-slate-50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-amber-700 uppercase mb-1">Landing / farm-gate (RM/kg)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    readOnly
+                    disabled={!removalForm.batchId || selectedRemovalBatch?.landingPrice == null}
+                    value={removalForm.pricePerKg}
+                    className="w-full border border-amber-200 p-3 rounded-xl bg-amber-50/50 disabled:bg-slate-50 text-amber-950 font-semibold"
+                    title="Taken from inventory landing price (Edit). Not editable here."
+                  />
+                </div>
+              </div>
+              {removalForm.batchId && selectedRemovalBatch && (
+                <p className="text-xs text-slate-500 -mt-2">
+                  Daily market on this batch: RM {(selectedRemovalBatch.dailyPrice || 0).toFixed(2)}/kg (not used for loss value)
+                  {selectedRemovalBatch.landingPrice == null
+                    ? ' · Landing price missing — open Edit on this inventory row, save landing / farm-gate, then try again.'
+                    : ' · Loss value locked to this landing price.'}
+                </p>
+              )}
+              <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Reason</label>
                 <select
                   value={removalForm.reason}
-                  onChange={e => setRemovalForm({ ...removalForm, reason: e.target.value })}
+                  onChange={(e) => setRemovalForm({ ...removalForm, reason: e.target.value })}
                   className="w-full border p-3 rounded-xl bg-white"
                 >
-                  {STOCK_REMOVAL_REASONS.map(r => (
+                  {STOCK_REMOVAL_REASONS.map((r) => (
                     <option key={r.value} value={r.value}>{r.label}</option>
                   ))}
                 </select>
@@ -934,24 +1483,56 @@ const InventoryPage = () => {
                   min="0.1"
                   max={removalMaxKg || undefined}
                   required
+                  disabled={!removalForm.batchId}
                   value={removalForm.quantityKg}
-                  onChange={e => setRemovalForm({ ...removalForm, quantityKg: e.target.value })}
-                  className="w-full border p-3 rounded-xl"
+                  onChange={(e) => setRemovalForm({ ...removalForm, quantityKg: e.target.value })}
+                  className="w-full border p-3 rounded-xl disabled:bg-slate-50"
                 />
               </div>
+              {removalForm.batchId && (
+                <div className="rounded-xl border border-orange-100 bg-orange-50 px-4 py-3 text-sm text-orange-900">
+                  <p className="font-bold">Loss value (landing / farm-gate)</p>
+                  <p className="mt-1">
+                    {parseFloat(removalForm.quantityKg) > 0
+                      ? `${parseFloat(removalForm.quantityKg).toFixed(1)} kg × RM ${(parseFloat(removalForm.pricePerKg) || 0).toFixed(2)}/kg = RM ${removalLedgerValue.toFixed(2)}`
+                      : `Uses landing RM ${(parseFloat(removalForm.pricePerKg) || 0).toFixed(2)}/kg`}
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Note (optional)</label>
                 <input
                   type="text"
                   placeholder="e.g. not fresh, ice melt, customer return"
                   value={removalForm.note}
-                  onChange={e => setRemovalForm({ ...removalForm, note: e.target.value })}
+                  onChange={(e) => setRemovalForm({ ...removalForm, note: e.target.value })}
                   className="w-full border p-3 rounded-xl"
                 />
               </div>
               <div className="flex justify-end gap-3 mt-6">
-                <button type="button" onClick={() => setIsRemovalOpen(false)} className="px-5 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-xl">Cancel</button>
-                <button type="submit" disabled={isRemoving} className="px-5 py-2 bg-orange-500 text-white font-bold rounded-xl shadow-lg hover:bg-orange-600 disabled:bg-slate-300">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsRemovalOpen(false);
+                    setRemovalForm({
+                      species: '',
+                      batchId: '',
+                      batchDate: '',
+                      pricePerKg: '',
+                      quantityKg: '',
+                      reason: 'spoiled',
+                      note: '',
+                    });
+                  }}
+                  className="px-5 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isRemoving || !removalForm.batchId}
+                  className="px-5 py-2 bg-orange-500 text-white font-bold rounded-xl shadow-lg hover:bg-orange-600 disabled:bg-slate-300"
+                >
                   {isRemoving ? 'Saving...' : 'Confirm removal'}
                 </button>
               </div>
@@ -963,12 +1544,93 @@ const InventoryPage = () => {
       {isModalOpen && (
         <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white w-full max-w-md rounded-2xl p-8 shadow-2xl">
-            <h3 className="text-xl font-bold mb-6 text-slate-800">Log New Catch</h3>
+            <h3 className="text-xl font-bold mb-2 text-slate-800">Log New Catch</h3>
+            <p className="text-sm text-slate-500 mb-6">
+              Landing / farm-gate is what you paid. Daily market is the selling price shown in the mobile Market tab.
+            </p>
             <form onSubmit={handleAddCatch} className="space-y-4">
-              <input type="text" placeholder="Species Name" required value={newCatch.species} onChange={e => setNewCatch({ ...newCatch, species: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
-              <div className="flex gap-4">
-                <input type="number" placeholder="Weight (KG)" step="0.1" required value={newCatch.weight} onChange={e => setNewCatch({ ...newCatch, weight: e.target.value })} className="w-1/2 border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
-                <input type="number" placeholder="Price (RM/KG)" step="0.01" required value={newCatch.price} onChange={e => setNewCatch({ ...newCatch, price: e.target.value })} className="w-1/2 border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Species catalog</label>
+                <select
+                  value=""
+                  onChange={(e) => applyCatalogSpecies(e.target.value)}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  <option value="">Pick from species catalog...</option>
+                  {SEAFOOD_CATALOG.map((entry) => (
+                    <option key={entry.name} value={entry.name}>
+                      {entry.name} — market RM {entry.pricePerKg.toFixed(2)}/kg
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <input
+                type="text"
+                list="species-catalog"
+                placeholder="Species Name"
+                required
+                value={newCatch.species}
+                onChange={e => setNewCatch({ ...newCatch, species: e.target.value })}
+                className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <datalist id="species-catalog">
+                {catalogSpeciesNames().map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Category</label>
+                <select
+                  value={newCatch.category}
+                  onChange={(e) => setNewCatch({ ...newCatch, category: e.target.value })}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                >
+                  {SEAFOOD_CATEGORY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.emoji} {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Weight (kg)</label>
+                <input
+                  type="number"
+                  placeholder="Weight (KG)"
+                  step="0.1"
+                  required
+                  value={newCatch.weight}
+                  onChange={e => setNewCatch({ ...newCatch, weight: e.target.value })}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-amber-700 uppercase mb-1">Landing / farm-gate (RM/kg)</label>
+                  <input
+                    type="number"
+                    placeholder="Cost paid"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={newCatch.landingPrice}
+                    onChange={e => setNewCatch({ ...newCatch, landingPrice: e.target.value })}
+                    className="w-full border border-amber-200 p-3 rounded-xl outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-blue-700 uppercase mb-1">Daily market (RM/kg)</label>
+                  <input
+                    type="number"
+                    placeholder="Selling price"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={newCatch.price}
+                    onChange={e => setNewCatch({ ...newCatch, price: e.target.value })}
+                    className="w-full border border-blue-200 p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
               </div>
               <div className="flex justify-end gap-3 mt-6">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="px-5 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-xl">Cancel</button>
@@ -986,29 +1648,76 @@ const InventoryPage = () => {
             <form onSubmit={handleUpdateItem} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Species Name</label>
-                <input type="text" required value={editItem.species} onChange={e => setEditItem({ ...editItem, species: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
+                <input
+                  type="text"
+                  list="species-catalog-edit"
+                  required
+                  value={editItem.species}
+                  onChange={e => setEditItem({ ...editItem, species: e.target.value })}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <datalist id="species-catalog-edit">
+                  {catalogSpeciesNames().map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current Stock (kg)</label>
+                <input type="number" step="0.1" required value={editItem.weight} onChange={e => setEditItem({ ...editItem, weight: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current Stock (kg)</label>
-                  <input type="number" step="0.1" required value={editItem.weight} onChange={e => setEditItem({ ...editItem, weight: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
+                  <label className="block text-xs font-bold text-amber-700 uppercase mb-1">Landing / farm-gate (RM/kg)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={editItem.landingPrice}
+                    onChange={e => setEditItem({ ...editItem, landingPrice: e.target.value })}
+                    className="w-full border border-amber-200 p-3 rounded-xl outline-none focus:ring-2 focus:ring-amber-500"
+                  />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Price (RM/kg)</label>
-                  <input type="number" step="0.01" required value={editItem.price} onChange={e => setEditItem({ ...editItem, price: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500" />
+                  <label className="block text-xs font-bold text-blue-700 uppercase mb-1">Daily market (RM/kg)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={editItem.price}
+                    onChange={e => setEditItem({ ...editItem, price: e.target.value })}
+                    className="w-full border border-blue-200 p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">Shown in mobile Market</p>
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Status</label>
-                <select value={editItem.status} onChange={e => setEditItem({ ...editItem, status: e.target.value })} className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500">
-                  <option value="In Stock">In Stock</option>
-                  <option value="Low Stock">Low Stock</option>
-                  <option value="Out of Stock">Out of Stock</option>
-                  <option value="Spoiled">Spoiled (label only)</option>
-                  <option value="Wastage">Wastage (label only)</option>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Category</label>
+                <select
+                  value={editItem.category}
+                  onChange={(e) => setEditItem({ ...editItem, category: e.target.value })}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {SEAFOOD_CATEGORY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.emoji} {option.label}
+                    </option>
+                  ))}
                 </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Stock status</label>
+                <div className="flex items-center gap-2 border border-slate-200 rounded-xl px-3 py-3 bg-slate-50">
+                  <StatusBadge status={stockStatusForWeight(parseFloat(editItem.weight) || 0)} />
+                  <span className="text-xs text-slate-500">
+                    Auto from kg — in stock &gt;{LOW_STOCK_THRESHOLD_KG} kg, low stock 1–{LOW_STOCK_THRESHOLD_KG} kg, 0 kg = out of stock
+                  </span>
+                </div>
                 <p className="text-xs text-slate-500 mt-1">
-                  Increasing or decreasing kg is logged in <strong>Stock ledger</strong>. For spoilage with a reason, use &quot;Record spoilage / loss&quot;.
+                  Stock kg, landing, and daily price changes are logged in <strong>Stock ledger</strong>.
+                  Spoilage / loss value uses <strong>landing / farm-gate</strong> (not daily market).
                 </p>
               </div>
               <div className="flex justify-end gap-3 mt-6">
@@ -1072,6 +1781,22 @@ const UserManagementPage = () => {
       setIsEditModalOpen(false);
     } catch (err) {
       alert("Error updating customer: " + err.message);
+    }
+  };
+
+  const toggleAccountStatus = async (user) => {
+    const nextStatus = user.status === 'Active' ? 'Suspended' : 'Active';
+    const action = nextStatus === 'Suspended' ? 'deactivate' : 'activate';
+    if (!window.confirm(`${action === 'deactivate' ? 'Deactivate' : 'Activate'} account for ${user.name || user.email}?`)) {
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'customers', user.id), {
+        status: nextStatus,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      alert(`Could not ${action} account: ${err.message}`);
     }
   };
 
@@ -1151,9 +1876,22 @@ const UserManagementPage = () => {
                     </span>
                   </td>
                   <td className="p-4 text-center">
-                    <button onClick={() => openEditModal(user)} className="bg-slate-100 text-slate-600 hover:bg-blue-100 hover:text-blue-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
-                      Edit
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleAccountStatus(user)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
+                          user.status === 'Active'
+                            ? 'bg-red-50 text-red-700 hover:bg-red-100'
+                            : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                        }`}
+                      >
+                        {user.status === 'Active' ? 'Deactivate' : 'Activate'}
+                      </button>
+                      <button onClick={() => openEditModal(user)} className="bg-slate-100 text-slate-600 hover:bg-blue-100 hover:text-blue-600 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors">
+                        Edit
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -1215,6 +1953,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
   const [buyerPhone, setBuyerPhone] = useState('');
   const [buyerType, setBuyerType] = useState('walk_in');
   const [saleType, setSaleType] = useState('cash');
+  const [amountPaidNow, setAmountPaidNow] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [creditNotes, setCreditNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -1254,6 +1993,20 @@ const SalesRecordsPage = ({ orders, inventory }) => {
     return resolvedQuantityKg * price;
   }, [quantityMode, saleAmountRm, resolvedQuantityKg, saleForm.pricePerKg]);
 
+  const paidNowValue = useMemo(() => {
+    if (amountPaidNow === '' || amountPaidNow == null) return null;
+    const n = parseFloat(amountPaidNow);
+    return Number.isNaN(n) ? null : n;
+  }, [amountPaidNow]);
+
+  const balanceDue = useMemo(() => {
+    if (paidNowValue == null) return totalAmount;
+    return Math.max(0, Number((totalAmount - paidNowValue).toFixed(2)));
+  }, [totalAmount, paidNowValue]);
+
+  const isFullyPaid = totalAmount > 0 && paidNowValue != null && paidNowValue >= totalAmount - 0.009;
+  const needsBuyerContact = totalAmount > 0 && !isFullyPaid;
+
   useEffect(() => {
     if (!selectedItem) return;
     const nextPrice = String(selectedItem.price);
@@ -1261,6 +2014,30 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       prev.pricePerKg === nextPrice ? prev : { ...prev, pricePerKg: nextPrice }
     ));
   }, [selectedItem?.id, selectedItem?.price]);
+
+  const prevSaleTotalRef = useRef(0);
+  // Default “customer paid” to full total when the bill first appears / was paid in full.
+  // Keep 0 or a partial amount the user already typed.
+  useEffect(() => {
+    if (totalAmount <= 0) {
+      setAmountPaidNow('');
+      prevSaleTotalRef.current = 0;
+      return;
+    }
+    setAmountPaidNow((prev) => {
+      const previousTotal = prevSaleTotalRef.current;
+      const current = parseFloat(prev);
+      const wasBlank = prev === '' || prev == null;
+      const wasFull =
+        wasBlank ||
+        Number.isNaN(current) ||
+        Math.abs(current - previousTotal) < 0.02;
+      prevSaleTotalRef.current = totalAmount;
+      if (wasFull) return totalAmount.toFixed(2);
+      if (!Number.isNaN(current) && current > totalAmount) return totalAmount.toFixed(2);
+      return prev;
+    });
+  }, [totalAmount]);
 
   const handleSpeciesChange = (species) => {
     const item = availableInventory.find(inv => normalizeSpeciesName(inv.species) === normalizeSpeciesName(species));
@@ -1329,18 +2106,34 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       alert(`Cannot sell more than available stock (${maxQuantityKg.toFixed(1)} kg).`);
       return;
     }
+    if (paidNowValue == null || paidNowValue < 0) {
+      alert('Enter how much the customer paid (RM). Use 0 if nothing paid yet.');
+      return;
+    }
+    if (paidNowValue > totalAmount + 0.009) {
+      alert(`Amount paid cannot exceed the sale total (RM ${totalAmount.toFixed(2)}).`);
+      return;
+    }
+
     const buyerLabel = buyerName.trim();
     const phoneLabel = buyerPhone.trim();
-    if (saleType !== 'cash' && !buyerLabel) {
-      alert('Enter the buyer name (restaurant / customer) for credit or pre-order sales.');
-      return;
+    const fullyPaid = paidNowValue >= totalAmount - 0.009;
+    if (!fullyPaid) {
+      if (!buyerLabel) {
+        alert('Customer did not pay in full — enter buyer name to follow up.');
+        return;
+      }
+      if (!phoneLabel) {
+        alert('Customer did not pay in full — enter phone / WhatsApp number to follow up.');
+        return;
+      }
     }
-    if (saleType !== 'cash' && !phoneLabel) {
-      alert('Enter the buyer phone number so you can follow up on payment.');
-      return;
-    }
-    const paymentStatus = saleType === 'cash' ? 'paid' : 'unpaid';
-    const amountPaid = saleType === 'cash' ? totalAmount : 0;
+
+    const amountPaid = Number(paidNowValue.toFixed(2));
+    const paymentStatus = fullyPaid ? 'paid' : (amountPaid > 0 ? 'partial' : 'unpaid');
+    // Underpaid cash sales are tracked as credit for Collections.
+    const savedSaleType = fullyPaid ? saleType : (saleType === 'cash' ? 'credit' : saleType);
+
     setIsSaving(true);
     try {
       await deductInventoryStock(inventory, saleForm.species, quantity);
@@ -1357,10 +2150,10 @@ const SalesRecordsPage = ({ orders, inventory }) => {
         buyerName: buyerLabel || 'Walk-in',
         buyerPhone: phoneLabel || null,
         buyerType: buyerLabel ? buyerType : 'walk_in',
-        saleType,
+        saleType: savedSaleType,
         paymentStatus,
         amountPaid,
-        dueDate: saleType !== 'cash' && dueDate ? dueDate : null,
+        dueDate: !fullyPaid && dueDate ? dueDate : null,
         creditNotes: creditNotes.trim() || null,
         createdAt: serverTimestamp(),
       });
@@ -1388,6 +2181,7 @@ const SalesRecordsPage = ({ orders, inventory }) => {
       setBuyerPhone('');
       setBuyerType('walk_in');
       setSaleType('cash');
+      setAmountPaidNow('');
       setDueDate('');
       setCreditNotes('');
     } catch (error) {
@@ -1710,8 +2504,45 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             <p className="text-xs text-slate-500 mt-1">Uses the latest price from Inventory &amp; Pricing.</p>
           </div>
 
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex justify-between items-center">
+            <span className="text-sm font-bold text-slate-500">Sale total</span>
+            <span className="text-xl font-black text-emerald-600">RM {totalAmount.toFixed(2)}</span>
+          </div>
+
           <div className="border-t border-slate-100 pt-4 space-y-3">
             <p className="text-xs font-bold text-slate-500 uppercase">Buyer &amp; payment</p>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
+                Customer paid (RM) *
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={totalAmount > 0 ? Number(totalAmount.toFixed(2)) : undefined}
+                  required
+                  placeholder="0.00"
+                  value={amountPaidNow}
+                  onChange={(e) => setAmountPaidNow(e.target.value)}
+                  className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  type="button"
+                  disabled={totalAmount <= 0}
+                  onClick={() => setAmountPaidNow(totalAmount.toFixed(2))}
+                  className="shrink-0 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-40"
+                >
+                  Full
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                How much did the customer pay now? Balance owing: {' '}
+                <strong className={balanceDue > 0.009 ? 'text-amber-700' : 'text-emerald-700'}>
+                  RM {balanceDue.toFixed(2)}
+                </strong>
+              </p>
+            </div>
             <div>
               <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Sale type</label>
               <select
@@ -1726,11 +2557,11 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
-                Buyer name {saleType !== 'cash' ? '*' : '(optional)'}
+                Buyer name {needsBuyerContact ? '*' : '(optional)'}
               </label>
               <input
                 type="text"
-                required={saleType !== 'cash'}
+                required={needsBuyerContact}
                 placeholder="e.g. Restoran Sri Mutiara"
                 value={buyerName}
                 onChange={e => setBuyerName(e.target.value)}
@@ -1751,18 +2582,24 @@ const SalesRecordsPage = ({ orders, inventory }) => {
             </div>
             <div>
               <label className="block text-xs font-bold text-slate-500 uppercase mb-1">
-                Phone / WhatsApp {saleType !== 'cash' ? '*' : '(optional)'}
+                Phone / WhatsApp {needsBuyerContact ? '*' : '(optional)'}
               </label>
               <input
                 type="tel"
-                required={saleType !== 'cash'}
+                required={needsBuyerContact}
                 placeholder="e.g. 012-345 6789"
                 value={buyerPhone}
                 onChange={e => setBuyerPhone(e.target.value)}
                 className="w-full border p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
-            {saleType !== 'cash' && (
+            {needsBuyerContact && (
+              <AlertBanner variant="warning" title="Not paid in full">
+                Name and phone are required. Balance RM {balanceDue.toFixed(2)} will show under{' '}
+                <strong>Collections</strong> until paid.
+              </AlertBanner>
+            )}
+            {(needsBuyerContact || saleType !== 'cash') && (
               <>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Due date</label>
@@ -1783,16 +2620,8 @@ const SalesRecordsPage = ({ orders, inventory }) => {
                     className="w-full border p-3 rounded-xl resize-none"
                   />
                 </div>
-                <AlertBanner variant="warning" title="Credit sale recorded">
-                  Stock will be deducted now. Track payment under <strong>Collections</strong> until fully paid.
-                </AlertBanner>
               </>
             )}
-          </div>
-
-          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex justify-between items-center">
-            <span className="text-sm font-bold text-slate-500">Calculated Total</span>
-            <span className="text-xl font-black text-emerald-600">RM {totalAmount.toFixed(2)}</span>
           </div>
 
           <button disabled={isSaving} type="submit" className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-5 py-3 rounded-xl font-bold shadow-lg shadow-blue-200 transition-colors">
@@ -2096,17 +2925,55 @@ const SalesRecordsPage = ({ orders, inventory }) => {
 // 4b. MONTHLY SALES REPORT (print / PDF)
 // ==========================================
 const MonthlySalesReportPage = ({ orders, storeInfo }) => {
-  const now = new Date();
-  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const [reportMonth, setReportMonth] = useState(defaultMonth);
+  // Always open on the current calendar month (ignore old saved ranges like June).
+  const [dateFrom, setDateFrom] = useState(() => getCurrentMonthRange().from);
+  const [dateTo, setDateTo] = useState(() => getCurrentMonthRange().to);
+  const [exportError, setExportError] = useState('');
+  const [exportingFormat, setExportingFormat] = useState('');
 
-  const { from, to, label: monthLabel } = useMemo(() => getMonthBounds(reportMonth), [reportMonth]);
+  useEffect(() => {
+    const { from, to } = getCurrentMonthRange();
+    setDateFrom(from);
+    setDateTo(to);
+    saveStoredReportDateRange(from, to);
+  }, []);
 
-  const monthOrders = useMemo(
+  const setDateRange = (from, to) => {
+    setDateFrom(from);
+    setDateTo(to);
+    saveStoredReportDateRange(from, to);
+  };
+
+  const handleThisMonth = () => {
+    const { from, to } = getCurrentMonthRange();
+    setDateRange(from, to);
+  };
+
+  const rangeInvalid = useMemo(() => {
+    const start = parseLocalDate(dateFrom);
+    const end = parseLocalDate(dateTo);
+    return Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end;
+  }, [dateFrom, dateTo]);
+
+  const periodLabel = useMemo(() => {
+    if (rangeInvalid) return 'Invalid range';
+    const fromD = parseLocalDate(dateFrom);
+    const toD = parseLocalDate(dateTo);
+    if (dateFrom === dateTo) {
+      return fromD.toLocaleDateString('en-MY', { day: 'numeric', month: 'long', year: 'numeric' });
+    }
+    return `${fromD.toLocaleDateString('en-MY', { day: 'numeric', month: 'short', year: 'numeric' })} — ${toD.toLocaleDateString('en-MY', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+  }, [dateFrom, dateTo, rangeInvalid]);
+
+  const periodOrders = useMemo(
     () => orders
-      .filter(o => orderInMonthKey(o, reportMonth))
+      .filter(o => {
+        const key = getOrderDateKey(o);
+        if (!key || rangeInvalid) return false;
+        return key >= dateFrom && key <= dateTo;
+      })
       .sort((a, b) => (getOrderDateKey(a) || '').localeCompare(getOrderDateKey(b) || '')),
-    [orders, reportMonth]
+    [orders, dateFrom, dateTo, rangeInvalid]
   );
 
   const summary = useMemo(() => {
@@ -2115,7 +2982,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
     let owing = 0;
     let paidCount = 0;
     let unpaidCount = 0;
-    monthOrders.forEach(order => {
+    periodOrders.forEach(order => {
       const total = getOrderTotal(order);
       const paid = getOrderAmountPaid(order);
       const due = getOrderAmountOwing(order);
@@ -2125,12 +2992,12 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
       if (due > 0.009) unpaidCount += 1;
       else paidCount += 1;
     });
-    return { totalSales, collected, owing, paidCount, unpaidCount, count: monthOrders.length };
-  }, [monthOrders]);
+    return { totalSales, collected, owing, paidCount, unpaidCount, count: periodOrders.length };
+  }, [periodOrders]);
 
   const buyerSummary = useMemo(() => {
     const map = new Map();
-    monthOrders.forEach(order => {
+    periodOrders.forEach(order => {
       const name = (order.buyerName || 'Walk-in / unspecified').trim();
       if (!map.has(name)) {
         map.set(name, {
@@ -2149,19 +3016,39 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
       row.owing += getOrderAmountOwing(order);
     });
     return [...map.values()].sort((a, b) => b.owing - a.owing || b.total - a.total);
-  }, [monthOrders]);
+  }, [periodOrders]);
 
   const unpaidBuyers = buyerSummary.filter(b => b.owing > 0.009);
   const paidBuyers = buyerSummary.filter(b => b.owing <= 0.009);
 
   const generatedAt = new Date().toLocaleString('en-MY', { dateStyle: 'medium', timeStyle: 'short' });
 
-  const handlePrintReport = () => {
-    document.body.classList.add('bh-print-report');
-    window.print();
-    window.addEventListener('afterprint', () => {
-      document.body.classList.remove('bh-print-report');
-    }, { once: true });
+  const exportPayload = useMemo(() => buildSalesReportPayload({
+    storeInfo,
+    dateFrom,
+    dateTo,
+    periodLabel,
+    summary,
+    buyerSummary,
+    periodOrders,
+    getBuyerTypeLabel,
+    getOrderDateKey,
+    getOrderTotal,
+    getOrderAmountPaid,
+    getOrderAmountOwing,
+    paymentStatusReportLabel,
+  }), [storeInfo, dateFrom, dateTo, periodLabel, summary, buyerSummary, periodOrders]);
+
+  const handleExport = async (format) => {
+    setExportError('');
+    setExportingFormat(format);
+    try {
+      await exportSalesReport(exportPayload, format);
+    } catch (err) {
+      setExportError(err.message || 'Export failed.');
+    } finally {
+      setExportingFormat('');
+    }
   };
 
   return (
@@ -2169,53 +3056,98 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
       <div className="no-print flex flex-wrap justify-between items-start gap-4">
         <PageHeader
           title="Monthly sales report"
-          subtitle="Sales ledger and payment status by buyer — print or save as PDF for your records."
+          subtitle="Sales ledger and payment status by buyer — download as CSV or Excel, or save as PDF."
         />
-        <button
-          type="button"
-          onClick={handlePrintReport}
-          disabled={monthOrders.length === 0}
-          className="bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-lg shrink-0"
-        >
-          Download PDF report
-        </button>
+        <div className="flex flex-wrap gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => handleExport('csv')}
+            disabled={periodOrders.length === 0 || rangeInvalid || exportingFormat}
+            className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg"
+          >
+            {exportingFormat === 'csv' ? 'Exporting…' : 'Download CSV'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport('xlsx')}
+            disabled={periodOrders.length === 0 || rangeInvalid || exportingFormat}
+            className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg"
+          >
+            {exportingFormat === 'xlsx' ? 'Exporting…' : 'Download Excel'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport('pdf')}
+            disabled={periodOrders.length === 0 || rangeInvalid || exportingFormat}
+            className="bg-slate-800 hover:bg-slate-900 disabled:bg-slate-300 text-white px-4 py-2.5 rounded-xl text-sm font-bold shadow-lg"
+          >
+            {exportingFormat === 'pdf' ? 'Opening…' : 'Save as PDF'}
+          </button>
+        </div>
       </div>
 
-      <div className="no-print bg-white rounded-2xl shadow-sm border border-slate-100 p-4 flex flex-wrap gap-4 items-end">
-        <div>
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Report month</label>
-          <input
-            type="month"
-            value={reportMonth}
-            onChange={e => setReportMonth(e.target.value)}
-            className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-          />
+      {exportError && (
+        <AlertBanner variant="danger" title="Export failed">
+          {exportError}
+        </AlertBanner>
+      )}
+
+      <div className="no-print bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-4 items-end">
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={e => setDateRange(e.target.value, dateTo)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">To</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={e => setDateRange(dateFrom, e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleThisMonth}
+            className="bg-slate-100 text-slate-600 hover:bg-slate-200 px-5 py-2.5 rounded-xl text-sm font-bold"
+          >
+            This month
+          </button>
         </div>
-        <p className="text-sm text-slate-500 pb-1">
-          Period: <strong>{from}</strong> to <strong>{to}</strong> · {monthOrders.length} sale(s)
+        <p className="text-sm text-slate-500 mt-3">
+          Period: <strong>{periodLabel}</strong> · {periodOrders.length} sale(s)
         </p>
+        {rangeInvalid && (
+          <p className="text-sm text-amber-700 font-semibold mt-2">Set From before To to load the report.</p>
+        )}
       </div>
 
       <div className="hidden print:block bh-report-cover mb-8 pb-6 border-b-2 border-slate-800">
         <h1 className="text-3xl font-black text-slate-900">{storeInfo.storeName || 'Boon Hua Fishery'}</h1>
         <p className="text-lg text-slate-600 mt-1">Monthly Sales &amp; Collection Report</p>
-        <p className="text-base font-bold text-slate-800 mt-3">{monthLabel}</p>
-        <p className="text-sm text-slate-500 mt-2">Period: {from} — {to}</p>
+        <p className="text-base font-bold text-slate-800 mt-3">{periodLabel}</p>
+        <p className="text-sm text-slate-500 mt-2">Period: {dateFrom} — {dateTo}</p>
         {storeInfo.address && <p className="text-sm text-slate-500 mt-1">{storeInfo.address}</p>}
         <p className="text-sm text-slate-500 mt-4">Generated: {generatedAt}</p>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 print:grid-cols-5 print:gap-2">
-        <StatCard label="Sales (month)" value={`RM ${summary.totalSales.toFixed(2)}`} hint={`${summary.count} transactions`} tone="emerald" />
-        <StatCard label="Collected" value={`RM ${summary.collected.toFixed(2)}`} hint="Paid in this month" tone="blue" />
+        <StatCard label="Sales (period)" value={`RM ${summary.totalSales.toFixed(2)}`} hint={`${summary.count} transactions`} tone="emerald" />
+        <StatCard label="Collected" value={`RM ${summary.collected.toFixed(2)}`} hint="Paid in this period" tone="blue" />
         <StatCard label="Still owing" value={`RM ${summary.owing.toFixed(2)}`} hint={`${summary.unpaidCount} unpaid bill(s)`} tone="orange" />
         <StatCard label="Fully paid" value={String(summary.paidCount)} hint="Bills settled" tone="slate" />
         <StatCard label="Buyers" value={String(buyerSummary.length)} hint="Unique names" tone="purple" />
       </div>
 
-      {monthOrders.length === 0 ? (
+      {periodOrders.length === 0 ? (
         <div className="bg-white rounded-2xl border border-dashed border-slate-200 p-12 text-center no-print">
-          <p className="font-bold text-slate-700">No sales recorded for {monthLabel}</p>
+          <p className="font-bold text-slate-700">No sales recorded for {periodLabel}</p>
           <p className="text-sm text-slate-500 mt-2">Record sales under Sales, then return here to generate the report.</p>
         </div>
       ) : (
@@ -2223,7 +3155,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 print:shadow-none print:border-slate-300 print:break-inside-avoid">
             <h3 className="text-lg font-bold text-slate-800 mb-2">Collection summary by buyer</h3>
             <p className="text-sm text-slate-500 mb-4 print:text-black">
-              Who has paid and who still owes for sales dated in {monthLabel}.
+              Who has paid and who still owes for sales dated in {periodLabel}.
             </p>
 
             {unpaidBuyers.length > 0 && (
@@ -2294,7 +3226,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
           </div>
 
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 print:shadow-none print:border-slate-300">
-            <h3 className="text-lg font-bold text-slate-800 mb-4">Sales ledger — {monthLabel}</h3>
+            <h3 className="text-lg font-bold text-slate-800 mb-4">Sales ledger — {periodLabel}</h3>
             <table className="bh-table w-full text-left text-sm border-collapse print:text-xs">
               <thead>
                 <tr className="bg-[#F5F6FA] text-slate-500 text-xs uppercase">
@@ -2311,7 +3243,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
                 </tr>
               </thead>
               <tbody>
-                {monthOrders.map(order => {
+                {periodOrders.map(order => {
                   const total = getOrderTotal(order);
                   const paid = getOrderAmountPaid(order);
                   const due = getOrderAmountOwing(order);
@@ -2333,7 +3265,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-slate-800 font-bold">
-                  <td className="p-3" colSpan={6}>Month total</td>
+                  <td className="p-3" colSpan={6}>Period total</td>
                   <td className="p-3 text-right">RM {summary.totalSales.toFixed(2)}</td>
                   <td className="p-3 text-right text-emerald-700">RM {summary.collected.toFixed(2)}</td>
                   <td className="p-3 text-right text-amber-700">RM {summary.owing.toFixed(2)}</td>
@@ -2344,7 +3276,7 @@ const MonthlySalesReportPage = ({ orders, storeInfo }) => {
           </div>
 
           <p className="hidden print:block text-xs text-slate-500 mt-8 pt-4 border-t border-slate-300">
-            This report lists sales by sale date in the selected month. Outstanding amounts are bills not yet fully collected — follow up via Collections.
+            This report lists sales by sale date in the selected period. Outstanding amounts are bills not yet fully collected — follow up via Collections.
           </p>
         </>
       )}
@@ -2449,9 +3381,9 @@ const CreditCollectionsPage = ({ orders }) => {
       </div>
 
       {totalOwing > 0 && (
-        <AlertBanner variant="danger" title="Collection risk">
+        <NotificationAlert variant="danger" title="Collection risk" id="collections-outstanding">
           Unpaid bills are not cash in hand. Follow up before extending more credit — especially large restaurant orders.
-        </AlertBanner>
+        </NotificationAlert>
       )}
 
       {byBuyer.length > 0 && (
@@ -2643,7 +3575,17 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
     }
 
     setForecastLoading(true);
-    fetchMlSalesForecast(apiBaseUrl, daily)
+    const primary = (apiBaseUrl || '').trim().replace(/\/+$/, '') || DEFAULT_FORECAST_API;
+    const fallbackApi = DEFAULT_FORECAST_API;
+
+    fetchMlSalesForecast(primary, daily)
+      .catch((err) => {
+        // Retry default Render URL if Settings has a bad/old API base.
+        if (primary !== fallbackApi) {
+          return fetchMlSalesForecast(fallbackApi, daily);
+        }
+        throw err;
+      })
       .then((result) => {
         if (!cancelled) setSalesForecast(result);
       })
@@ -2657,16 +3599,16 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
     return () => { cancelled = true; };
   }, [orders, apiBaseUrl]);
 
-  const [dateFrom, setDateFrom] = useState(() => {
-    const stored = loadStoredDateRange();
-    if (stored) return stored.dateFrom;
-    return getLast7DaysRange().from;
-  });
-  const [dateTo, setDateTo] = useState(() => {
-    const stored = loadStoredDateRange();
-    if (stored) return stored.dateTo;
-    return getLast7DaysRange().to;
-  });
+  // Always open on the rolling last 7 days (ignore old saved ranges like June).
+  const [dateFrom, setDateFrom] = useState(() => getLast7DaysRange().from);
+  const [dateTo, setDateTo] = useState(() => getLast7DaysRange().to);
+
+  useEffect(() => {
+    const { from, to } = getLast7DaysRange();
+    setDateFrom(from);
+    setDateTo(to);
+    saveStoredDateRange(from, to);
+  }, []);
 
   const setDateRange = (from, to) => {
     setDateFrom(from);
@@ -2746,10 +3688,7 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
   }, [filteredOrders]);
 
   const lowStockItems = useMemo(
-    () => consolidateInventoryBySpecies(inventory).filter(item => {
-      const w = parseFloat(item.weight || 0);
-      return w > 0 && w < 5;
-    }),
+    () => consolidateInventoryBySpecies(inventory).filter(item => isLowStockWeight(item.weight)),
     [inventory]
   );
 
@@ -2782,18 +3721,22 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
   return (
     <div id="dashboard-overview" className="space-y-6 min-w-0 max-w-full overflow-x-hidden">
       {lowStockItems.length > 0 && (
-        <AlertBanner variant="warning" title="Low stock alert">
-          {lowStockItems.map(i => i.species).join(', ')} — below 5 kg. Consider restocking or promoting sales.
-        </AlertBanner>
+        <NotificationAlert variant="warning" title="Low stock alert" id="low-stock">
+          {lowStockItems.map(i => i.species).join(', ')} — at or below {LOW_STOCK_THRESHOLD_KG} kg. Consider restocking or promoting sales.
+        </NotificationAlert>
       )}
 
       {lossInPeriodKg > 0 && (
-        <AlertBanner variant="danger" title="Stock losses in selected period">
+        <NotificationAlert
+          variant="danger"
+          title="Stock losses in selected period"
+          id={stockLossesNotificationId(dateFrom, dateTo)}
+        >
           {lossInPeriodKg.toFixed(1)} kg recorded as spoilage, wastage, or damage.{' '}
           <Link to="/inventory?tab=ledger" className="font-bold underline">
             View Stock ledger →
           </Link>
-        </AlertBanner>
+        </NotificationAlert>
       )}
 
       <div className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100">
@@ -2806,7 +3749,7 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">To</label>
             <input type="date" value={dateTo} onChange={e => setDateRange(dateFrom, e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
-          <button type="button" onClick={handleLast7Days} className="bg-slate-100 text-slate-600 hover:bg-slate-200 px-5 py-2.5 rounded-xl text-sm font-bold">
+          <button type="button" onClick={handleLast7Days} className="no-print bg-slate-100 text-slate-600 hover:bg-slate-200 px-5 py-2.5 rounded-xl text-sm font-bold">
             Last 7 Days
           </button>
         </div>
@@ -2859,8 +3802,11 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
             <p className="text-slate-500 text-sm flex-1">Top-selling items will appear after sales records are saved.</p>
           ) : (
             <div className="space-y-3 print:space-y-2 flex-1 overflow-y-auto min-h-0 pr-1">
-              {topSellingItems.map(item => (
-                <div key={item.species} className="flex items-center justify-between border border-slate-100 rounded-xl p-4 print:break-inside-avoid print:p-3">
+              {topSellingItems.map((item) => (
+                <div
+                  key={item.species}
+                  className="flex items-center justify-between border border-slate-100 rounded-xl p-4 print:break-inside-avoid print:p-3"
+                >
                   <div className="min-w-0 pr-2">
                     <p className="font-bold text-slate-800 truncate">{item.species}</p>
                     <p className="text-xs text-slate-500">{item.quantityKg.toFixed(1)} kg sold</p>
@@ -2945,6 +3891,9 @@ const OverviewPage = ({ inventory, customerCount, orders, inventoryHistory = [] 
               data={salesForecast.chartSeries}
               showForecastLegend
             />
+            <p className="text-xs text-slate-400 mt-4 pt-3 border-t border-slate-100">
+              {forecastModelLabel(salesForecast)}
+            </p>
           </>
         )}
       </div>
@@ -2962,6 +3911,7 @@ export default function App() {
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [adminSessionReady, setAdminSessionReady] = useState(false);
 
   // FIX: lift inventory + customers to App so OverviewPage gets real counts
   const [inventory, setInventory] = useState([]);
@@ -2986,6 +3936,39 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  // Verify web admin access (bootstrap adminProfiles on first login; block consumer-only).
+  useEffect(() => {
+    if (!currentUser) {
+      setAdminSessionReady(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setAdminSessionReady(false);
+
+    (async () => {
+      try {
+        const result = await resolveWebAdminSession(currentUser);
+        if (cancelled) return;
+        if (!result.allowed) {
+          await signOut(auth);
+          setError(result.message || 'Access denied.');
+          return;
+        }
+        setAdminSessionReady(true);
+      } catch (err) {
+        if (!cancelled) {
+          await signOut(auth);
+          setError(`Could not verify administrator access: ${err.message}`);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser]);
 
   // Load shared data once logged in
   useEffect(() => {
@@ -3028,20 +4011,32 @@ export default function App() {
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
+    setError('');
+    setSuccessMsg('');
     try {
       if (authView === 'login') {
-        await signInWithEmailAndPassword(auth, formData.email, formData.password);
+        setAdminSessionReady(false);
+        const credential = await signInWithEmailAndPassword(auth, formData.email, formData.password);
+        const result = await resolveWebAdminSession(credential.user);
+        if (!result.allowed) {
+          await signOut(auth);
+          setError(result.message || 'Access denied.');
+          return;
+        }
+        setAdminSessionReady(true);
       } else if (authView === 'forgot') {
         await sendPasswordResetEmail(auth, formData.email);
         setSuccessMsg(`✓ Reset link sent to ${formData.email}.`);
       }
     } catch (err) {
+      setAdminSessionReady(false);
       setError("✕ " + err.message.replace("Firebase: ", ""));
     }
   };
 
   const handleLogout = async () => {
     try {
+      setAdminSessionReady(false);
       await signOut(auth);
       setAuthView('login');
       setFormData({ email: '', password: '' });
@@ -3050,12 +4045,14 @@ export default function App() {
     }
   };
 
-  // Show nothing while Firebase resolves session
-  if (authLoading) {
+  // Wait for Firebase session and admin verification before showing dashboard.
+  if (authLoading || (currentUser && !adminSessionReady)) {
     return (
       <div className="min-h-screen bg-[#F0F2F8] flex flex-col items-center justify-center gap-4">
         <div className="w-11 h-11 border-4 border-[#4379EE] border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm font-semibold text-slate-500">Loading Boon Hua Admin…</p>
+        <p className="text-sm font-semibold text-slate-500">
+          {currentUser ? 'Verifying administrator access…' : 'Loading Boon Hua Admin…'}
+        </p>
       </div>
     );
   }
@@ -3133,18 +4130,30 @@ export default function App() {
 
   // --- DASHBOARD LAYOUT ---
   return (
-    <BrowserRouter>
-      <AdminDashboardShell storeInfo={storeInfo} currentUser={currentUser} onLogout={handleLogout}>
-        <Routes>
-          <Route path="/" element={<OverviewPage inventory={inventory} customerCount={customers.length} orders={orders} inventoryHistory={inventoryHistory} />} />
-          <Route path="/inventory" element={<InventoryPage />} />
-          <Route path="/sales" element={<SalesRecordsPage orders={orders} inventory={inventory} />} />
-          <Route path="/credit" element={<CreditCollectionsPage orders={orders} />} />
-          <Route path="/reports" element={<MonthlySalesReportPage orders={orders} storeInfo={storeInfo} />} />
-          <Route path="/users" element={<UserManagementPage />} />
-          <Route path="/settings" element={<SettingsPage currentUser={currentUser} />} />
-        </Routes>
-      </AdminDashboardShell>
-    </BrowserRouter>
+    <AdminNotificationProvider
+      userEmail={currentUser?.email}
+      inventory={inventory}
+      orders={orders}
+      inventoryHistory={inventoryHistory}
+    >
+      <BrowserRouter>
+        <AdminDashboardShell
+          storeInfo={storeInfo}
+          currentUser={currentUser}
+          onLogout={handleLogout}
+          headerExtra={<AdminNotificationBell />}
+        >
+          <Routes>
+            <Route path="/" element={<OverviewPage inventory={inventory} customerCount={customers.length} orders={orders} inventoryHistory={inventoryHistory} />} />
+            <Route path="/inventory" element={<InventoryPage />} />
+            <Route path="/sales" element={<SalesRecordsPage orders={orders} inventory={inventory} />} />
+            <Route path="/credit" element={<CreditCollectionsPage orders={orders} />} />
+            <Route path="/reports" element={<MonthlySalesReportPage orders={orders} storeInfo={storeInfo} />} />
+            <Route path="/users" element={<UserManagementPage />} />
+            <Route path="/settings" element={<SettingsPage currentUser={currentUser} />} />
+          </Routes>
+        </AdminDashboardShell>
+      </BrowserRouter>
+    </AdminNotificationProvider>
   );
 }

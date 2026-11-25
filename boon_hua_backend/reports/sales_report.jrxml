@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports http://jasperreports.sourceforge.net/xsd/jasperreport.xsd"
+    name="sales_report" pageWidth="595" pageHeight="842" columnWidth="555"
+    leftMargin="20" rightMargin="20" topMargin="24" bottomMargin="24"
+    uuid="c2c2c2c2-2222-4222-8222-222222222202">
+    <property name="com.jaspersoft.studio.data.defaultdataadapter" value="One Empty Record"/>
+    <parameter name="storeName" class="java.lang.String"/>
+    <parameter name="periodLabel" class="java.lang.String"/>
+    <parameter name="dateFrom" class="java.lang.String"/>
+    <parameter name="dateTo" class="java.lang.String"/>
+    <parameter name="generatedAt" class="java.lang.String"/>
+    <parameter name="totalSales" class="java.lang.Double"/>
+    <parameter name="collected" class="java.lang.Double"/>
+    <parameter name="owing" class="java.lang.Double"/>
+    <parameter name="txCount" class="java.lang.Integer"/>
+    <parameter name="paidCount" class="java.lang.Integer"/>
+    <parameter name="unpaidCount" class="java.lang.Integer"/>
+    <parameter name="buyerCount" class="java.lang.Integer"/>
+    <parameter name="SUBREPORT_DIR" class="java.lang.String"/>
+    <queryString language="json"><![CDATA[ledger]]></queryString>
+    <field name="ref" class="java.lang.String"/>
+    <field name="date" class="java.lang.String"/>
+    <field name="buyer" class="java.lang.String"/>
+    <field name="phone" class="java.lang.String"/>
+    <field name="item" class="java.lang.String"/>
+    <field name="qtyKg" class="java.lang.String"/>
+    <field name="total" class="java.lang.Double"/>
+    <field name="paid" class="java.lang.Double"/>
+    <field name="owing" class="java.lang.Double"/>
+    <field name="status" class="java.lang.String"/>
+    <title>
+        <band height="250">
+            <staticText>
+                <reportElement x="0" y="0" width="555" height="28" uuid="t1"/>
+                <textElement textAlignment="Center"><font size="16" isBold="true"/></textElement>
+                <text><![CDATA[Boon Hua Fishery — Sales & Collection Report]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="0" y="30" width="120" height="14" uuid="t2"/>
+                <textElement><font size="9" isBold="true"/></textElement>
+                <text><![CDATA[Store]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="120" y="30" width="435" height="14" uuid="t3"/>
+                <textElement><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{storeName}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="48" width="120" height="14" uuid="t4"/>
+                <textElement><font size="9" isBold="true"/></textElement>
+                <text><![CDATA[Period]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="120" y="48" width="435" height="14" uuid="t5"/>
+                <textElement><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{periodLabel}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="66" width="120" height="14" uuid="t6"/>
+                <textElement><font size="9" isBold="true"/></textElement>
+                <text><![CDATA[Date range]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="120" y="66" width="435" height="14" uuid="t7"/>
+                <textElement><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{dateFrom} + " to " + $P{dateTo}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="84" width="120" height="14" uuid="t8"/>
+                <textElement><font size="9" isBold="true"/></textElement>
+                <text><![CDATA[Generated]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="120" y="84" width="435" height="14" uuid="t9"/>
+                <textElement><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{generatedAt}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="108" width="555" height="16" uuid="t10"/>
+                <textElement><font size="10" isBold="true"/></textElement>
+                <text><![CDATA[Summary]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="0" y="128" width="180" height="14" uuid="t11"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Total sales (RM)]]></text>
+            </staticText>
+            <textField pattern="#,##0.00">
+                <reportElement x="180" y="128" width="120" height="14" uuid="t12"/>
+                <textElement textAlignment="Right"><font size="9" isBold="true"/></textElement>
+                <textFieldExpression><![CDATA[$P{totalSales}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="146" width="180" height="14" uuid="t13"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Collected (RM)]]></text>
+            </staticText>
+            <textField pattern="#,##0.00">
+                <reportElement x="180" y="146" width="120" height="14" uuid="t14"/>
+                <textElement textAlignment="Right"><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{collected}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="164" width="180" height="14" uuid="t15"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Still owing (RM)]]></text>
+            </staticText>
+            <textField pattern="#,##0.00">
+                <reportElement x="180" y="164" width="120" height="14" uuid="t16"/>
+                <textElement textAlignment="Right"><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{owing}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="300" y="128" width="120" height="14" uuid="t17"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Transactions]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="420" y="128" width="60" height="14" uuid="t18"/>
+                <textElement textAlignment="Right"><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{txCount}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="300" y="146" width="120" height="14" uuid="t19"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Paid / Unpaid bills]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="420" y="146" width="60" height="14" uuid="t20"/>
+                <textElement textAlignment="Right"><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{paidCount} + " / " + $P{unpaidCount}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="300" y="164" width="120" height="14" uuid="t21"/>
+                <textElement><font size="9"/></textElement>
+                <text><![CDATA[Unique buyers]]></text>
+            </staticText>
+            <textField>
+                <reportElement x="420" y="164" width="60" height="14" uuid="t22"/>
+                <textElement textAlignment="Right"><font size="9"/></textElement>
+                <textFieldExpression><![CDATA[$P{buyerCount}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="0" y="188" width="555" height="14" uuid="t23"/>
+                <textElement><font size="9" isItalic="true"/></textElement>
+                <text><![CDATA[Formatted with JasperReports (Jaspersoft) — sales_report.jrxml]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="0" y="206" width="555" height="16" uuid="t24"/>
+                <textElement><font size="10" isBold="true"/></textElement>
+                <text><![CDATA[Collection by buyer]]></text>
+            </staticText>
+            <subreport>
+                <reportElement x="0" y="224" width="555" height="24" uuid="t25"/>
+                <dataSourceExpression><![CDATA[((net.sf.jasperreports.engine.data.JsonDataSource)$P{REPORT_DATA_SOURCE}).subDataSource("buyers")]]></dataSourceExpression>
+                <subreportExpression><![CDATA[$P{SUBREPORT_DIR} + "buyers_subreport.jasper"]]></subreportExpression>
+            </subreport>
+        </band>
+    </title>
+    <columnHeader>
+        <band height="36">
+            <staticText>
+                <reportElement x="0" y="16" width="555" height="16" uuid="h0"/>
+                <textElement><font size="10" isBold="true"/></textElement>
+                <text><![CDATA[Sales ledger]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="0" y="0" width="48" height="14" uuid="h1"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Ref]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="48" y="0" width="52" height="14" uuid="h2"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Date]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="100" y="0" width="78" height="14" uuid="h3"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Buyer]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="178" y="0" width="62" height="14" uuid="h4"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Phone]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="240" y="0" width="88" height="14" uuid="h5"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Item]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="328" y="0" width="40" height="14" uuid="h6"/>
+                <textElement textAlignment="Right"><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Qty kg]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="368" y="0" width="46" height="14" uuid="h7"/>
+                <textElement textAlignment="Right"><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Total]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="414" y="0" width="46" height="14" uuid="h8"/>
+                <textElement textAlignment="Right"><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Paid]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="460" y="0" width="46" height="14" uuid="h9"/>
+                <textElement textAlignment="Right"><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Owing]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="506" y="0" width="49" height="14" uuid="h10"/>
+                <textElement><font isBold="true" size="8"/></textElement>
+                <text><![CDATA[Status]]></text>
+            </staticText>
+        </band>
+    </columnHeader>
+    <detail>
+        <band height="18">
+            <textField isStretchWithOverflow="true">
+                <reportElement x="0" y="0" width="48" height="16" uuid="r1"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{ref}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="48" y="0" width="52" height="16" uuid="r2"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{date}]]></textFieldExpression>
+            </textField>
+            <textField isStretchWithOverflow="true">
+                <reportElement x="100" y="0" width="78" height="16" uuid="r3"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{buyer}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="178" y="0" width="62" height="16" uuid="r4"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{phone}]]></textFieldExpression>
+            </textField>
+            <textField isStretchWithOverflow="true">
+                <reportElement x="240" y="0" width="88" height="16" uuid="r5"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{item}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="328" y="0" width="40" height="16" uuid="r6"/>
+                <textElement textAlignment="Right"><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{qtyKg}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="368" y="0" width="46" height="16" uuid="r7"/>
+                <textElement textAlignment="Right"><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{total}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="414" y="0" width="46" height="16" uuid="r8"/>
+                <textElement textAlignment="Right"><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{paid}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="460" y="0" width="46" height="16" uuid="r9"/>
+                <textElement textAlignment="Right"><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{owing}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="506" y="0" width="49" height="16" uuid="r10"/>
+                <textElement><font size="7"/></textElement>
+                <textFieldExpression><![CDATA[$F{status}]]></textFieldExpression>
+            </textField>
+        </band>
+    </detail>
+    <pageFooter>
+        <band height="18">
+            <textField>
+                <reportElement x="0" y="0" width="280" height="14" uuid="f1"/>
+                <textElement><font size="8"/></textElement>
+                <textFieldExpression><![CDATA["Page " + $V{PAGE_NUMBER}]]></textFieldExpression>
+            </textField>
+            <staticText>
+                <reportElement x="280" y="0" width="275" height="14" uuid="f2"/>
+                <textElement textAlignment="Right"><font size="8"/></textElement>
+                <text><![CDATA[Boon Hua Fishery — JasperReports export]]></text>
+            </staticText>
+        </band>
+    </pageFooter>
+</jasperReport>

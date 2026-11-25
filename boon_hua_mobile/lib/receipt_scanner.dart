@@ -123,41 +123,80 @@ class ReceiptParser {
       var pricePerKg = (map['pricePerKg'] as num?)?.toDouble() ?? 0;
       if (quantityKg <= 0 && totalPrice <= 0) continue;
       final qty = quantityKg > 0 ? quantityKg : 1.0;
-      if (pricePerKg <= 0) {
-        pricePerKg = const PriceNormalizer().calculatePricePerKg(
-          totalPrice: totalPrice,
-          quantityKg: qty,
-        );
-      }
       final total = totalPrice > 0 ? totalPrice : pricePerKg * qty;
       final modelConfidence = (map['confidence'] as num?)?.toDouble();
-      // Evidence from AI rawText + field consistency (never a flat 0.9).
-      final evidenceSource = rawText.isNotEmpty
-          ? rawText
-          : '$species ${qty}kg RM$total';
+      // Bind confidence evidence to this row only (not the whole note).
+      final evidenceSource = '$species ${qty}kg RM$total';
       items.add(
-        ReceiptItem(
+        parser._finalizeParsedItem(
           species: species,
           quantityKg: qty,
           totalPrice: total,
-          pricePerKg: pricePerKg,
-          confidence: parser._scoreItemConfidence(
-            species: species,
-            quantityKg: qty,
-            totalPrice: total,
-            pricePerKg: pricePerKg,
-            sourceText: evidenceSource,
-            modelConfidence: modelConfidence,
-            fromAiVision: true,
-          ),
+          pricePerKg: pricePerKg > 0 ? pricePerKg : null,
+          sourceText: evidenceSource,
+          modelConfidence: modelConfidence,
+          fromAiVision: true,
         ),
       );
     }
-    return ParsedReceipt(
+    var receipt = ParsedReceipt(
       rawText: rawText.isNotEmpty ? rawText : jsonEncode(json),
       purchaseDate: purchaseDate,
       items: items,
     );
+    // Model often returns 1 object while rawText still lists every row — recover them.
+    if (rawText.isNotEmpty) {
+      receipt = mergePreferringMoreItems(receipt, parser.parse(rawText));
+    }
+    return receipt;
+  }
+
+  /// Keep every distinct species row; never let a thinner parse replace a richer one.
+  static ParsedReceipt mergePreferringMoreItems(
+    ParsedReceipt primary,
+    ParsedReceipt secondary,
+  ) {
+    if (primary.items.isEmpty) return secondary;
+    if (secondary.items.isEmpty) return primary;
+
+    final baseIsPrimary = primary.items.length >= secondary.items.length;
+    final base = baseIsPrimary ? primary : secondary;
+    final extra = baseIsPrimary ? secondary : primary;
+
+    final merged = <ReceiptItem>[...base.items];
+    for (final item in extra.items) {
+      final key = item.species.trim().toLowerCase();
+      final index = merged.indexWhere((e) {
+        final existing = e.species.trim().toLowerCase();
+        return existing == key ||
+            existing.contains(key) ||
+            key.contains(existing);
+      });
+      if (index < 0) {
+        merged.add(item);
+        continue;
+      }
+      // Same species from two parsers — keep the more plausible row.
+      merged[index] = _preferBetterItem(merged[index], item);
+    }
+
+    return ParsedReceipt(
+      rawText: base.rawText.isNotEmpty ? base.rawText : extra.rawText,
+      purchaseDate: base.purchaseDate,
+      items: merged,
+      focusedItemIndex: base.focusedItemIndex,
+    );
+  }
+
+  static ReceiptItem _preferBetterItem(ReceiptItem a, ReceiptItem b) {
+    final aTiny = a.quantityKg > 0 && a.quantityKg < 0.12;
+    final bTiny = b.quantityKg > 0 && b.quantityKg < 0.12;
+    if (aTiny && !bTiny) return b;
+    if (bTiny && !aTiny) return a;
+    if ((a.totalPrice <= 0) != (b.totalPrice <= 0)) {
+      return a.totalPrice > 0 ? a : b;
+    }
+    return a.confidence >= b.confidence ? a : b;
   }
 
   static DateTime? _parseAiPurchaseDate(dynamic value) {
@@ -414,7 +453,10 @@ class ReceiptParser {
 
     final unitToken = weightMatch.group(2)!.toLowerCase();
     final quantityKg =
-        (unitToken == 'g' || unitToken == 'gram' || unitToken == 'grams')
+        (unitToken == 'g' ||
+                unitToken == 'gram' ||
+                unitToken == 'grams' ||
+                unitToken == 'q')
             ? rawQty / 1000
             : rawQty;
 
@@ -750,25 +792,14 @@ class ReceiptParser {
     }
     if (totalPrice <= 0) return null;
 
-    final ppk = unitPrice > 0
-        ? unitPrice
-        : _normalizer.calculatePricePerKg(
-            totalPrice: totalPrice,
-            quantityKg: quantityKg,
-          );
-    return ReceiptItem(
+    final ppk = unitPrice > 0 ? unitPrice : null;
+    return _finalizeParsedItem(
       species: species,
       quantityKg: quantityKg,
       totalPrice: totalPrice,
       pricePerKg: ppk,
-      confidence: _scoreItemConfidence(
-        species: species,
-        quantityKg: quantityKg,
-        totalPrice: totalPrice,
-        pricePerKg: ppk,
-        sourceText: line,
-        invoiceStructured: true,
-      ),
+      sourceText: line,
+      invoiceStructured: true,
     );
   }
 
@@ -869,25 +900,14 @@ class ReceiptParser {
       if (extracted == null) continue;
 
       final evidence = afterName.trim().isNotEmpty ? afterName : rowWindow;
-      final ppk = extracted.unitPrice ??
-          _normalizer.calculatePricePerKg(
-            totalPrice: extracted.totalPrice,
-            quantityKg: extracted.quantityKg,
-          );
       items.add(
-        ReceiptItem(
+        _finalizeParsedItem(
           species: species.name,
           quantityKg: extracted.quantityKg,
           totalPrice: extracted.totalPrice,
-          pricePerKg: ppk,
-          confidence: _scoreItemConfidence(
-            species: species.name,
-            quantityKg: extracted.quantityKg,
-            totalPrice: extracted.totalPrice,
-            pricePerKg: ppk,
-            sourceText: evidence,
-            keywordScattered: true,
-          ),
+          pricePerKg: extracted.unitPrice,
+          sourceText: evidence,
+          keywordScattered: true,
         ),
       );
     }
@@ -896,26 +916,14 @@ class ReceiptParser {
     if (items.isEmpty && speciesHits.length == 1) {
       final extracted = _extractWeightAndPrice(cleaned, requireRm: true);
       if (extracted != null) {
-        final species = speciesHits.first.name;
-        final ppk = extracted.unitPrice ??
-            _normalizer.calculatePricePerKg(
-              totalPrice: extracted.totalPrice,
-              quantityKg: extracted.quantityKg,
-            );
         items.add(
-          ReceiptItem(
-            species: species,
+          _finalizeParsedItem(
+            species: speciesHits.first.name,
             quantityKg: extracted.quantityKg,
             totalPrice: extracted.totalPrice,
-            pricePerKg: ppk,
-            confidence: _scoreItemConfidence(
-              species: species,
-              quantityKg: extracted.quantityKg,
-              totalPrice: extracted.totalPrice,
-              pricePerKg: ppk,
-              sourceText: cleaned,
-              keywordScattered: true,
-            ),
+            pricePerKg: extracted.unitPrice,
+            sourceText: cleaned,
+            keywordScattered: true,
           ),
         );
       }
@@ -951,10 +959,43 @@ class ReceiptParser {
       }
     }
 
+    // Near-miss OCR (sqlmon → Salmon), including beside already-found exact hits
+    // so a 2nd typo row is not dropped when the 1st name matched cleanly.
+    final wordRe = RegExp(r'[A-Za-z]{4,}');
+    for (final match in wordRe.allMatches(cleaned)) {
+      final raw = match.group(0)!;
+      if (_isReceiptMetadataLine(raw.toLowerCase())) continue;
+      final overlaps = usedRanges.any(
+        (r) => match.start < r.$2 && match.end > r.$1,
+      );
+      if (overlaps) continue;
+      final corrected = _fuzzyCorrectSpecies(raw);
+      if (corrected.toLowerCase() == raw.toLowerCase()) continue;
+      final known = SeafoodCatalog.findByName(corrected) != null ||
+          SeafoodCatalog.all.any(
+            (e) => e.keywords.any(
+              (k) =>
+                  SeafoodCatalog.lettersKey(k) ==
+                  SeafoodCatalog.lettersKey(corrected),
+            ),
+          );
+      if (!known) continue;
+      speciesHits.add((
+        start: match.start,
+        end: match.end,
+        name: corrected,
+      ));
+      usedRanges.add((match.start, match.end));
+    }
+
     if (speciesHits.isEmpty) {
       final nameGuess = _extractSpeciesName(cleaned);
       if (nameGuess.isNotEmpty) {
-        speciesHits.add((start: 0, end: nameGuess.length.clamp(0, cleaned.length), name: nameGuess));
+        speciesHits.add((
+          start: 0,
+          end: nameGuess.length.clamp(0, cleaned.length),
+          name: nameGuess,
+        ));
       }
     }
     return speciesHits;
@@ -985,27 +1026,14 @@ class ReceiptParser {
       final species = _extractSpeciesName(trimmed);
       if (species.isEmpty) continue;
 
-      final quantityKg = extracted.quantityKg;
-      final totalPrice = extracted.totalPrice;
-      final ppk = extracted.unitPrice ??
-          _normalizer.calculatePricePerKg(
-            totalPrice: totalPrice,
-            quantityKg: quantityKg,
-          );
       items.add(
-        ReceiptItem(
+        _finalizeParsedItem(
           species: species,
-          quantityKg: quantityKg,
-          totalPrice: totalPrice,
-          pricePerKg: ppk,
-          confidence: _scoreItemConfidence(
-            species: species,
-            quantityKg: quantityKg,
-            totalPrice: totalPrice,
-            pricePerKg: ppk,
-            sourceText: trimmed,
-            keywordScattered: true,
-          ),
+          quantityKg: extracted.quantityKg,
+          totalPrice: extracted.totalPrice,
+          pricePerKg: extracted.unitPrice,
+          sourceText: trimmed,
+          keywordScattered: true,
         ),
       );
     }
@@ -1096,27 +1124,169 @@ class ReceiptParser {
     final totalPrice = extracted.totalPrice;
     if (quantityKg <= 0 || totalPrice <= 0) return null;
 
-    final ppk = extracted.unitPrice ??
-        _normalizer.calculatePricePerKg(
-          totalPrice: totalPrice,
-          quantityKg: quantityKg,
-        );
-    return ReceiptItem(
+    return _finalizeParsedItem(
       species: species,
       quantityKg: quantityKg,
       totalPrice: totalPrice,
+      pricePerKg: extracted.unitPrice,
+      sourceText: normalized,
+    );
+  }
+
+  /// Apply fuzzy species fix + weight repair, then score trustworthy confidence.
+  ReceiptItem _finalizeParsedItem({
+    required String species,
+    required double quantityKg,
+    required double totalPrice,
+    double? pricePerKg,
+    required String sourceText,
+    bool invoiceStructured = false,
+    bool keywordScattered = false,
+    bool fromAiVision = false,
+    double? modelConfidence,
+  }) {
+    final corrected = _fuzzyCorrectSpecies(species);
+    var fuzzyFixed =
+        corrected.toLowerCase() != species.trim().toLowerCase();
+    // Hit finder may already have renamed sqlmon→Salmon; still flag the typo.
+    if (!fuzzyFixed) {
+      fuzzyFixed = _sourceHasSpeciesTypo(sourceText, corrected);
+    }
+    final reconciledQty =
+        _reconcileQuantityKg(quantityKg, sourceText) ?? quantityKg;
+    final weightCorrected = (reconciledQty - quantityKg).abs() > 0.001;
+    final qty = reconciledQty > 0 ? reconciledQty : quantityKg;
+    final total = totalPrice > 0 ? totalPrice : 0.0;
+    final ppk = (pricePerKg != null && pricePerKg > 0 && !weightCorrected)
+        ? pricePerKg
+        : _normalizer.calculatePricePerKg(totalPrice: total, quantityKg: qty);
+
+    return ReceiptItem(
+      species: corrected,
+      quantityKg: qty,
+      totalPrice: total,
       pricePerKg: ppk,
       confidence: _scoreItemConfidence(
-        species: species,
-        quantityKg: quantityKg,
-        totalPrice: totalPrice,
+        species: corrected,
+        quantityKg: qty,
+        totalPrice: total,
         pricePerKg: ppk,
-        sourceText: normalized,
+        sourceText: sourceText,
+        invoiceStructured: invoiceStructured,
+        keywordScattered: keywordScattered,
+        fromAiVision: fromAiVision,
+        modelConfidence: modelConfidence,
+        fuzzyFixed: fuzzyFixed,
+        weightCorrected: weightCorrected,
       ),
     );
   }
 
-  /// Confidence from real parse evidence (keywords + math), not a fixed random score.
+  /// True when OCR text still shows a near-miss spelling of [corrected].
+  bool _sourceHasSpeciesTypo(String source, String corrected) {
+    final entry = SeafoodCatalog.findByName(corrected);
+    if (entry == null) return false;
+    final lower = source.toLowerCase();
+    if (lower.contains(corrected.toLowerCase())) return false;
+    if (entry.keywords.any((k) => k.length >= 4 && lower.contains(k))) {
+      return false;
+    }
+    for (final match in RegExp(r'[A-Za-z]{4,}').allMatches(source)) {
+      final word = match.group(0)!;
+      if (word.toLowerCase() == corrected.toLowerCase()) continue;
+      if (entry.keywords.contains(word.toLowerCase())) continue;
+      if (_fuzzyCorrectSpecies(word) == corrected) return true;
+    }
+    return false;
+  }
+
+  /// OCR / human spelling near-miss → catalog label (sqlmon→Salmon).
+  /// Leaves multi-word invoice descriptions alone when nothing is close.
+  String _fuzzyCorrectSpecies(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.length < 3) return trimmed;
+
+    final corrected = SeafoodCatalog.correctNearMissSpecies(trimmed);
+    if (corrected != trimmed) return corrected;
+
+    // Multi-word OCR line: only replace when a single distinctive token
+    // clearly matches (fresh sqlmon → Salmon). Leave invoice phrases alone.
+    final words =
+        trimmed.split(RegExp(r'\s+')).where((w) => w.length >= 4).toList();
+    if (words.length <= 1) return trimmed;
+
+    String? hit;
+    for (final word in words) {
+      final one = SeafoodCatalog.correctNearMissSpecies(word);
+      if (one.toLowerCase() == word.toLowerCase()) continue;
+      final oneKey = SeafoodCatalog.lettersKey(one);
+      // Ignore generic upgrades (ikan→Ikan) inside longer descriptions.
+      if (oneKey == SeafoodCatalog.lettersKey(word)) continue;
+      if (hit != null && hit.toLowerCase() != one.toLowerCase()) {
+        return trimmed;
+      }
+      hit = one;
+    }
+    // Only auto-replace the whole field when it was essentially one typo token.
+    if (hit != null && words.length <= 2) return hit;
+    return trimmed;
+  }
+
+  /// If source clearly has 750g but value is 0.05kg, prefer 0.75kg.
+  double? _reconcileQuantityKg(double reported, String source) {
+    final gramMatches = RegExp(
+      r'(\d{2,4})\s*(?:g|gram|grams|q)\b',
+      caseSensitive: false,
+    ).allMatches(source).toList();
+
+    // Prefer the largest plausible gram reading when AI/local scaled wrong.
+    double? bestGramKg;
+    for (final match in gramMatches) {
+      final grams = _parseNumber(match.group(1));
+      if (grams == null || grams < 20 || grams > 5000) continue;
+      final asKg = grams / 1000;
+      if (bestGramKg == null || asKg > bestGramKg) bestGramKg = asKg;
+    }
+    if (bestGramKg != null) {
+      if (reported <= 0) return bestGramKg;
+      final rel = (bestGramKg - reported).abs() / bestGramKg;
+      // OCR drops a digit (750g → 50g → 0.05kg) or AI mis-scales.
+      if (rel > 0.15) return bestGramKg;
+    }
+
+    // Tiny kg while digits look like dropped leading 7/9 (0.050 ≈ 50g from 750g).
+    if (reported > 0 && reported < 0.15) {
+      final asGrams = (reported * 1000).round();
+      for (final match in gramMatches) {
+        final grams = _parseNumber(match.group(1));
+        if (grams == null) continue;
+        final g = grams.round();
+        if (g >= 100 &&
+            (g % 100 == asGrams || g % 1000 == asGrams || (g - asGrams).abs() <= 5)) {
+          return grams / 1000;
+        }
+      }
+    }
+
+    final kgMatches = RegExp(
+      r'(\d+(?:\.\d+)?)\s*(?:kg|kgs|kilo)\b',
+      caseSensitive: false,
+    ).allMatches(source);
+    for (final match in kgMatches) {
+      final kg = _parseNumber(match.group(1));
+      if (kg == null || kg <= 0) continue;
+      if (reported <= 0) return kg;
+      // Prefer gram evidence over a conflicting tiny kg in the same source.
+      if (bestGramKg != null && kg < 0.15 && bestGramKg >= 0.2) {
+        continue;
+      }
+      final rel = (kg - reported).abs() / kg;
+      if (rel > 0.2) return kg;
+    }
+    return null;
+  }
+
+  /// Confidence from real parse evidence — capped so bad OCR cannot show ~90%.
   double _scoreItemConfidence({
     required String species,
     required double quantityKg,
@@ -1127,47 +1297,70 @@ class ReceiptParser {
     bool keywordScattered = false,
     bool fromAiVision = false,
     double? modelConfidence,
+    bool fuzzyFixed = false,
+    bool weightCorrected = false,
   }) {
-    var score = 0.28;
+    var score = 0.12;
     final hasRm = RegExp(r'\bRM\s*\d', caseSensitive: false).hasMatch(sourceText) ||
         RegExp(r'\bMYR\b', caseSensitive: false).hasMatch(sourceText);
     final hasWeightUnit = RegExp(
       '\\d+(?:\\.\\d+)?\\s*$_weightUnitPattern\\b',
       caseSensitive: false,
     ).hasMatch(sourceText);
-    final speciesKey = species.toLowerCase();
-    final inCatalog = _seafoodHints.any(
-      (h) => speciesKey.contains(h) || h == speciesKey,
-    );
+    final inCatalog = SeafoodCatalog.findByName(species) != null ||
+        _seafoodHints.any((h) => species.toLowerCase() == h);
 
-    if (hasRm) score += 0.18;
-    if (hasWeightUnit) score += 0.18;
-    if (inCatalog) score += 0.14;
-    if (species.trim().length >= 3) score += 0.06;
-    if (quantityKg > 0) score += 0.04;
-    if (totalPrice > 0) score += 0.04;
+    if (hasRm) score += 0.14;
+    if (hasWeightUnit) score += 0.14;
+    if (inCatalog) score += 0.16;
+    if (species.trim().length >= 3) score += 0.04;
+    if (quantityKg > 0) score += 0.03;
+    if (totalPrice > 0) score += 0.03;
 
+    var mathPerfect = false;
     if (quantityKg > 0 && pricePerKg > 0 && totalPrice > 0) {
       final expected = pricePerKg * quantityKg;
       final relErr = (expected - totalPrice).abs() /
           (totalPrice > 0.01 ? totalPrice : expected);
       if (relErr <= 0.02) {
-        score += 0.12;
+        score += 0.1;
+        mathPerfect = true;
       } else if (relErr <= 0.08) {
-        score += 0.05;
+        score += 0.04;
       } else {
-        score -= 0.1;
+        score -= 0.14;
       }
     }
 
-    if (invoiceStructured) score += 0.08;
-    if (keywordScattered) score -= 0.04;
-    if (fromAiVision) score += 0.06;
+    if (invoiceStructured) score += 0.06;
+    if (keywordScattered) score -= 0.05;
+    if (fromAiVision) score += 0.02;
+    if (fuzzyFixed) score -= 0.22;
+    if (weightCorrected) score -= 0.16;
+
+    // Tiny kg while source shows hundreds of grams → untrustworthy.
+    if (quantityKg > 0 &&
+        quantityKg < 0.12 &&
+        RegExp(r'\d{3,}\s*(?:g|gram|grams|q)\b', caseSensitive: false)
+            .hasMatch(sourceText)) {
+      score -= 0.22;
+    }
+
+    if (!inCatalog) {
+      score -= 0.16;
+    }
 
     if (modelConfidence != null) {
       final model = modelConfidence.clamp(0.0, 1.0);
-      // Blend so UI % reflects both model readability and field evidence.
-      score = (score * 0.55) + (model * 0.45);
+      // Evidence dominates; model alone must not inflate to ~90%.
+      score = (score * 0.78) + (model * 0.22);
+    }
+
+    // Hard caps so UI stays honest (bad OCR must not show ~90%).
+    if (!inCatalog) score = score.clamp(0.0, 0.52);
+    if (fuzzyFixed || weightCorrected) score = score.clamp(0.0, 0.55);
+    if (!(invoiceStructured && inCatalog && mathPerfect)) {
+      score = score.clamp(0.0, 0.84);
     }
 
     return score.clamp(0.0, 1.0);
@@ -1356,11 +1549,12 @@ class ReceiptScanner {
             )
           : _parser.parse(raw);
 
-      // Fast path: local ML Kit when it already found solid items.
-      // AI vision is only for empty / low-confidence handwriting (slower).
+      // Fast path: local ML Kit when it already found multiple rows.
+      // AI only for empty / single weak line — never replace 2+ local rows with 1 AI row.
       const aiConfidenceThreshold = 0.72;
       final needsAi = mlKitParsed.items.isEmpty ||
-          mlKitParsed.parseConfidence < aiConfidenceThreshold;
+          (mlKitParsed.items.length < 2 &&
+              mlKitParsed.parseConfidence < aiConfidenceThreshold);
 
       ParsedReceipt parsed = mlKitParsed;
       String? aiError;
@@ -1370,11 +1564,12 @@ class ReceiptScanner {
             File(imagePath),
             mlKitHint: raw.isEmpty ? null : raw,
           );
-          if (aiParsed.items.isNotEmpty) {
-            parsed = aiParsed;
-          } else if (mlKitParsed.items.isEmpty &&
+          if (aiParsed.items.isNotEmpty ||
               aiParsed.rawText.trim().isNotEmpty) {
-            parsed = aiParsed;
+            parsed = ReceiptParser.mergePreferringMoreItems(
+              mlKitParsed,
+              aiParsed,
+            );
           }
         } catch (error) {
           aiError = '$error';

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:boon_hua_mobile/data/seafood_catalog.dart';
 import 'package:boon_hua_mobile/receipt_scanner.dart';
 
 void main() {
@@ -283,5 +284,83 @@ RM9
     expect(strong.items, isNotEmpty);
     expect(weak.items, isNotEmpty);
     expect(strong.items.first.confidence, greaterThan(weak.items.first.confidence));
+  });
+
+  test('fuzzy-corrects sqlmon to Salmon and keeps 750g', () {
+    final result = parser.parse('sqlmon 750g RM50');
+    expect(result.items.length, 1);
+    expect(result.items.first.species, 'Salmon');
+    expect(result.items.first.quantityKg, 0.75);
+    expect(result.items.first.totalPrice, 50);
+    // Typo fix must not look "highly confident".
+    expect(result.items.first.confidence, lessThan(0.65));
+  });
+
+  test('auto-corrects common OCR and human spelling near-misses', () {
+    expect(SeafoodCatalog.correctNearMissSpecies('sqlmon'), 'Salmon');
+    expect(SeafoodCatalog.correctNearMissSpecies('samon'), 'Salmon');
+    expect(SeafoodCatalog.correctNearMissSpecies('octupus'), 'Octopus');
+    expect(SeafoodCatalog.correctNearMissSpecies('stingrai'), 'Stingray');
+    expect(SeafoodCatalog.correctNearMissSpecies('tigar prawn'), 'Tiger Prawn');
+    // Invoice-style names stay as written (not forced to Tilapia via "ikan").
+    expect(
+      SeafoodCatalog.correctNearMissSpecies('Ikan Bara Merah'),
+      'Ikan Bara Merah',
+    );
+  });
+
+  test('keeps both items when AI returns one but rawText has two', () {
+    final result = ReceiptParser.parsedReceiptFromAiJson({
+      'purchaseDate': '2026-10-25',
+      'rawText': 'Salmon 750g RM50\nCrab 700g RM35',
+      'items': [
+        {
+          'species': 'Salmon',
+          'quantityKg': 0.75,
+          'totalPrice': 50,
+          'pricePerKg': 66.67,
+          'confidence': 0.8,
+        },
+      ],
+    });
+    expect(result.items.length, 2);
+    expect(
+      result.items.any((i) => i.species.toLowerCase().contains('salmon')),
+      isTrue,
+    );
+    expect(
+      result.items.any((i) => i.species.toLowerCase().contains('crab')),
+      isTrue,
+    );
+  });
+
+  test('mergePreferringMoreItems never drops the richer parse', () {
+    final rich = parser.parse('Salmon 750g RM50\nCrab 700g RM35');
+    final thin = parser.parse('Salmon 750g RM50');
+    final merged = ReceiptParser.mergePreferringMoreItems(thin, rich);
+    expect(merged.items.length, 2);
+  });
+
+  test('AI wrong kg is reconciled from rawText 750g and confidence stays modest', () {
+    final result = ReceiptParser.parsedReceiptFromAiJson({
+      'purchaseDate': '2026-10-25',
+      'rawText': 'sqlmon 750g RM50',
+      'items': [
+        {
+          'species': 'sqlmon',
+          'quantityKg': 0.05,
+          'totalPrice': 50,
+          'pricePerKg': 1000,
+          'confidence': 0.9,
+        },
+      ],
+    });
+    expect(result.items.length, 1);
+    expect(result.items.first.species, 'Salmon');
+    expect(result.items.first.quantityKg, closeTo(0.75, 0.001));
+    expect(result.items.first.totalPrice, 50);
+    expect(result.items.first.pricePerKg, closeTo(50 / 0.75, 0.01));
+    expect(result.items.first.confidence, lessThan(0.65));
+    expect(result.items.first.confidence, greaterThan(0.2));
   });
 }

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports http://jasperreports.sourceforge.net/xsd/jasperreport.xsd"
+    name="buyers_subreport" pageWidth="555" pageHeight="120" columnWidth="555"
+    leftMargin="0" rightMargin="0" topMargin="0" bottomMargin="0" uuid="b1b1b1b1-1111-4111-8111-111111111101">
+    <queryString language="json"><![CDATA[buyers]]></queryString>
+    <field name="name" class="java.lang.String"/>
+    <field name="buyerTypeLabel" class="java.lang.String"/>
+    <field name="bills" class="java.lang.Integer"/>
+    <field name="total" class="java.lang.Double"/>
+    <field name="paid" class="java.lang.Double"/>
+    <field name="owing" class="java.lang.Double"/>
+    <columnHeader height="22">
+        <band>
+            <staticText>
+                <reportElement x="0" y="0" width="140" height="18" uuid="a1"/>
+                <textElement><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Buyer]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="140" y="0" width="70" height="18" uuid="a2"/>
+                <textElement><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Type]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="210" y="0" width="45" height="18" uuid="a3"/>
+                <textElement textAlignment="Right"><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Bills]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="255" y="0" width="70" height="18" uuid="a4"/>
+                <textElement textAlignment="Right"><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Sales (RM)]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="325" y="0" width="70" height="18" uuid="a5"/>
+                <textElement textAlignment="Right"><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Paid (RM)]]></text>
+            </staticText>
+            <staticText>
+                <reportElement x="395" y="0" width="70" height="18" uuid="a6"/>
+                <textElement textAlignment="Right"><font isBold="true" size="9"/></textElement>
+                <text><![CDATA[Owing (RM)]]></text>
+            </staticText>
+        </band>
+    </columnHeader>
+    <detail>
+        <band height="18">
+            <textField isStretchWithOverflow="true">
+                <reportElement x="0" y="0" width="140" height="16" uuid="d1"/>
+                <textElement><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{name}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="140" y="0" width="70" height="16" uuid="d2"/>
+                <textElement><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{buyerTypeLabel}]]></textFieldExpression>
+            </textField>
+            <textField>
+                <reportElement x="210" y="0" width="45" height="16" uuid="d3"/>
+                <textElement textAlignment="Right"><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{bills}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="255" y="0" width="70" height="16" uuid="d4"/>
+                <textElement textAlignment="Right"><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{total}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="325" y="0" width="70" height="16" uuid="d5"/>
+                <textElement textAlignment="Right"><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{paid}]]></textFieldExpression>
+            </textField>
+            <textField pattern="#,##0.00">
+                <reportElement x="395" y="0" width="70" height="16" uuid="d6"/>
+                <textElement textAlignment="Right"><font size="8"/></textElement>
+                <textFieldExpression><![CDATA[$F{owing}]]></textFieldExpression>
+            </textField>
+        </band>
+    </detail>
+</jasperReport>

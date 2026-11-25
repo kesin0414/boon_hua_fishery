@@ -3037,22 +3037,6 @@ class _CompareScreenState extends State<CompareScreen> {
                     label: const Text('Clear form'),
                   ),
                 ),
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: AppColors.teal,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    onPressed: () => setState(() {}),
-                    icon: const Icon(Icons.calculate_outlined),
-                    label: const Text('Calculate RM/kg'),
-                  ),
-                ),
-                const SizedBox(height: 16),
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.all(18),
@@ -4963,6 +4947,7 @@ class FormFieldBox extends StatelessWidget {
     this.suffixIcon,
     this.obscureText = false,
     this.onChanged,
+    this.onEditingComplete,
   });
 
   final String label;
@@ -4973,6 +4958,7 @@ class FormFieldBox extends StatelessWidget {
   final IconData? suffixIcon;
   final bool obscureText;
   final ValueChanged<String>? onChanged;
+  final VoidCallback? onEditingComplete;
 
   @override
   Widget build(BuildContext context) {
@@ -4995,6 +4981,7 @@ class FormFieldBox extends StatelessWidget {
             controller: controller,
             obscureText: obscureText,
             onChanged: onChanged,
+            onEditingComplete: onEditingComplete,
             decoration: InputDecoration(
               hintText: hint,
               prefixText: prefix,
@@ -5221,7 +5208,9 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
       _rows = widget.receipt.items
           .map(
             (item) => _EditableReceiptRow(
-              speciesController: TextEditingController(text: item.species),
+              speciesController: TextEditingController(
+                text: SeafoodCatalog.correctNearMissSpecies(item.species),
+              ),
               weightController: TextEditingController(
                 text: item.quantityKg.toStringAsFixed(3),
               ),
@@ -5232,6 +5221,20 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
           )
           .toList();
     }
+  }
+
+  void _autocorrectSpeciesField(int index) {
+    final controller = _rows[index].speciesController;
+    final raw = controller.text.trim();
+    if (raw.isEmpty) return;
+    final corrected = SeafoodCatalog.correctNearMissSpecies(raw);
+    if (corrected != raw) {
+      controller.value = TextEditingValue(
+        text: corrected,
+        selection: TextSelection.collapsed(offset: corrected.length),
+      );
+    }
+    setState(() => _focusedIndex = index);
   }
 
   void _addItemRow() {
@@ -5275,7 +5278,9 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
     var focusedOutputIndex = 0;
     for (var i = 0; i < _rows.length; i++) {
       final row = _rows[i];
-      final species = row.speciesController.text.trim();
+      final species = SeafoodCatalog.correctNearMissSpecies(
+        row.speciesController.text.trim(),
+      );
       if (species.isEmpty) continue;
       final quantityKg = double.tryParse(row.weightController.text) ?? 0;
       final totalPrice = double.tryParse(row.totalController.text) ?? 0;
@@ -5381,9 +5386,9 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
               const SizedBox(height: 6),
               Text(
                 'OCR confidence: ${(widget.receipt.parseConfidence * 100).toStringAsFixed(0)}% '
-                '${widget.receipt.parseConfidence >= 0.85 ? '(meets 85% target)' : '(review fields carefully)'}',
+                '${widget.receipt.parseConfidence >= 0.75 ? '(looks solid — still check kg / RM)' : '(low — fix species, kg, and RM before save)'}',
                 style: TextStyle(
-                  color: widget.receipt.parseConfidence >= 0.85
+                  color: widget.receipt.parseConfidence >= 0.75
                       ? AppColors.teal
                       : const Color(0xFFE65100),
                   fontSize: 11,
@@ -5492,7 +5497,9 @@ class _ReceiptReviewSheetState extends State<ReceiptReviewSheet> {
             FormFieldBox(
               label: 'SPECIES',
               controller: row.speciesController,
+              hint: 'Auto-fixes close spellings (e.g. sqlmon → Salmon)',
               onChanged: (_) => setState(() => _focusedIndex = index),
+              onEditingComplete: () => _autocorrectSpeciesField(index),
             ),
             Row(
               children: [

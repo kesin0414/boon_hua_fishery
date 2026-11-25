@@ -278,7 +278,15 @@ def _rate_limited_error_message(message: str) -> bool:
         "rate-limited" in lower
         or "too many requests" in lower
         or "temporarily rate-limited" in lower
+        or "high demand" in lower
+        or "temporarily overloaded" in lower
+        or "try again in a minute" in lower
     )
+
+
+_USER_AI_BUSY_MESSAGE = (
+    "AI is on high demand right now. Please wait a bit for more quota, then try again."
+)
 
 
 @app.post("/seafood/identify")
@@ -292,15 +300,13 @@ def seafood_identify(request: SeafoodIdentifyRequest):
             mime_type=request.mimeType,
         )
     except RuntimeError as e:
-        detail = str(e)
-        if _rate_limited_error_message(detail):
-            raise HTTPException(
-                status_code=429,
-                detail="AI is busy right now. Please try again in a minute.",
-            )
-        raise HTTPException(status_code=503, detail=detail)
+        # Log full provider detail server-side; never expose it to the phone UI.
+        print(f"WARN: /seafood/identify failed: {e}")
+        status = 429 if _rate_limited_error_message(str(e)) else 503
+        raise HTTPException(status_code=status, detail=_USER_AI_BUSY_MESSAGE)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"ERROR: /seafood/identify failed: {e}")
+        raise HTTPException(status_code=503, detail=_USER_AI_BUSY_MESSAGE)
 
 
 @app.post("/receipt/ocr")
